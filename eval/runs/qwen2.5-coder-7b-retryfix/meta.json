@@ -1,0 +1,7 @@
+{
+  "llm": "local:qwen2.5-coder-7b-instruct",
+  "started": "2026-11-20T08:53:17",
+  "max_retries": 3,
+  "repeats": 1,
+  "n_cases": 52
+}
