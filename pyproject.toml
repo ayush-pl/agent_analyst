@@ -1,0 +1,16 @@
+[project]
+name = "ai-data-analyst"
+version = "0.1.0"
+description = "LangGraph agent: business question -> SQL (with retries and human approval) -> chart -> summary, using MCP tools and Claude."
+requires-python = ">=3.10"
+dependencies = ["anthropic>=2.11.0", "langgraph>=1.2", "mcp>=2.3", "matplotlib>=3.9", "pydantic>=2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools]
+packages = ["analyst"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

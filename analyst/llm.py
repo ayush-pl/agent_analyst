@@ -1,0 +1,279 @@
+"""Model layer: the SQL model, chart planner and summary writer.
+
+``ClaudeAnalystLLM`` calls Claude through the official Anthropic SDK with
+structured outputs. ``MockAnalystLLM`` is a deterministic, offline stand-in so
+the demo and tests run without an API key (it deliberately writes a broken
+query for one demo question so you can watch the retry loop work).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Any, Literal, Optional, Protocol, Sequence
+
+from pydantic import BaseModel, Field
+
+DEFAULT_MODEL = os.environ.get("ANALYST_MODEL", "claude-opus-5-5")
+
+
+# --------------------------------------------------------------------------- schemas
+class SQLProposal(BaseModel):
+    sql: str = Field(description="A single read-only SQLite SELECT/WITH query.")
+    rationale: str = Field(description="One or two sentences explaining the approach.")
+
+
+class ChartSpec(BaseModel):
+    chart_type: Literal["bar", "hbar", "line", "none"]
+    x: Optional[str] = Field(default=None, description="Result column for categories / time.")
+    y: Optional[str] = Field(default=None, description="Result column holding the numeric measure.")
+    series: Optional[str] = Field(default=None, description="Optional column that splits the data into series.")
+    title: str = ""
+    y_label: Optional[str] = None
+
+
+class AnalystLLM(Protocol):
+    name: str
+
+    async def generate_sql(self, question: str, schema: str, attempts: Sequence[dict]) -> SQLProposal: ...
+    async def plan_chart(self, question: str, columns: Sequence[str], rows: Sequence[Sequence[Any]]) -> ChartSpec: ...
+    async def summarize(self, question: str, sql: str, columns: Sequence[str],
+                        rows: Sequence[Sequence[Any]], chart: ChartSpec | None, truncated: bool) -> str: ...
+
+
+# --------------------------------------------------------------------------- helpers
+def _preview(columns: Sequence[str], rows: Sequence[Sequence[Any]], limit: int = 60) -> str:
+    head = [list(columns)] + [list(r) for r in rows[:limit]]
+    body = "\n".join(json.dumps(r, default=str) for r in head)
+    more = f"\n... ({len(rows) - limit} more rows)" if len(rows) > limit else ""
+    return body + more
+
+
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+_DATEISH = re.compile(r"^\d{4}(-\d{2}){0,2}$|^\d{4}-Q[1-4]$")
+
+
+def heuristic_chart(question: str, columns: Sequence[str], rows: Sequence[Sequence[Any]]) -> ChartSpec:
+    """Pick a sensible chart from the shape of the result (no model call)."""
+    cols = list(columns)
+    if not rows or len(cols) < 2 or len(rows) == 1:
+        return ChartSpec(chart_type="none", title=question)
+    first = rows[0]
+    num_idx = [i for i, v in enumerate(first) if _is_number(v)]
+    cat_idx = [i for i, v in enumerate(first) if not _is_number(v)]
+    if not num_idx:
+        return ChartSpec(chart_type="none", title=question)
+    y = cols[num_idx[0]]
+    if not cat_idx:
+        x = cols[0]
+        series = None
+    else:
+        x = cols[cat_idx[0]]
+        series = cols[cat_idx[1]] if len(cat_idx) > 1 else None
+    timeish = all(_DATEISH.match(str(r[cols.index(x)])) for r in rows[:20])
+    if timeish:
+        kind = "line"
+    elif series:
+        kind = "bar"
+    else:
+        kind = "hbar" if len(rows) > 6 or max(len(str(r[cols.index(x)])) for r in rows) > 12 else "bar"
+    return ChartSpec(chart_type=kind, x=x, y=y, series=series, title=question.rstrip("?"),
+                     y_label=y.replace("_", " "))
+
+
+# --------------------------------------------------------------------------- Claude
+SQL_SYSTEM = """You are the SQL model inside an AI data-analyst agent.
+Translate the business question into ONE read-only SQLite query against the schema provided.
+
+Rules:
+- SQLite dialect only (strftime for dates, no ILIKE, no DATE_TRUNC).
+- A single SELECT or WITH statement. Never write, alter or create anything.
+- Give every computed column a clear snake_case alias; round money to 2 decimals.
+- Return chart-friendly shapes: a category/time column first, then numeric measures; for
+  multi-series questions return long format (x, series, value).
+- Order results meaningfully (time ascending, rankings descending) and LIMIT rankings to a
+  reasonable top N (default 10) unless the question asks otherwise.
+- Revenue = quantity * unit_price * (1 - discount) on order_items, counting only
+  completed orders unless the question says otherwise.
+- If previous attempts failed, read the database error carefully and fix the cause."""
+
+CHART_SYSTEM = """You choose the chart for a query result in an analytics report.
+Choose chart_type from: line (change over time), bar (compare a few categories or grouped
+series), hbar (rankings or long category labels), none (a single number or data that does
+not chart well). Never propose a second y-axis. x, y and series must be exact column names
+from the result. Use series only for long-format results with a category column that splits
+lines/bars (max 8 series). Write a short, specific title (no trailing period)."""
+
+SUMMARY_SYSTEM = """You are a senior data analyst writing for a business stakeholder.
+Given the question, the SQL that was run and its result, write a concise summary in Markdown:
+- Lead with a one-sentence direct answer that includes the key number(s).
+- Then 2-4 bullet points of supporting insights (comparisons, trends, outliers, shares).
+- Only state facts supported by the data shown; note caveats (e.g. truncated results,
+  partial periods) briefly. Do not restate the SQL. Keep it under 150 words."""
+
+
+class ClaudeAnalystLLM:
+    """Claude-backed SQL model, chart planner and summary writer."""
+
+    def __init__(self, model: str = DEFAULT_MODEL, effort: str = "medium", client: Any = None):
+        import anthropic
+
+        self.anthropic = anthropic
+        self.client = client or anthropic.AsyncAnthropic(max_retries=3)
+        self.model = model
+        self.effort = effort
+        self.name = f"claude:{model}"
+
+    def _common(self) -> dict[str, Any]:
+        # Server-side refusal fallback: if a safety classifier declines, the API
+        # re-runs the request on a fallback model inside the same call.
+        return {
+            "model": self.model,
+            "betas": ["server-side-fallback-2026-07-01"],
+            "fallbacks": "default",
+            "output_config": {"effort": self.effort},
+        }
+
+    async def _parse(self, system: str, user: str, schema: type[BaseModel], max_tokens: int = 16000):
+        resp = await self.client.beta.messages.parse(
+            **self._common(), max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": user}], output_format=schema,
+        )
+        if resp.stop_reason == "refusal":
+            raise RuntimeError("The model declined this request.")
+        if resp.stop_reason == "max_tokens" or resp.parsed_output is None:
+            raise RuntimeError(f"Model returned no structured output (stop_reason={resp.stop_reason}).")
+        return resp.parsed_output
+
+    async def generate_sql(self, question: str, schema: str, attempts: Sequence[dict]) -> SQLProposal:
+        parts = [f"<schema>\n{schema}\n</schema>", f"<question>{question}</question>"]
+        if attempts:
+            hist = "\n\n".join(
+                f"Attempt {i + 1}:\n```sql\n{a['sql']}\n```\nError: {a['error']}" for i, a in enumerate(attempts))
+            parts.append(f"<previous_failed_attempts>\n{hist}\n</previous_failed_attempts>\n"
+                         "Write a corrected query that avoids these errors.")
+        return await self._parse(SQL_SYSTEM, "\n\n".join(parts), SQLProposal)
+
+    async def plan_chart(self, question, columns, rows) -> ChartSpec:
+        user = f"Question: {question}\n\nResult (first row is the header):\n{_preview(columns, rows, 25)}"
+        return await self._parse(CHART_SYSTEM, user, ChartSpec, max_tokens=4000)
+
+    async def summarize(self, question, sql, columns, rows, chart, truncated) -> str:
+        user = (f"Question: {question}\n\nSQL:\n```sql\n{sql}\n```\n\n"
+                f"Result ({len(rows)} rows{', truncated' if truncated else ''}; first row is the header):\n"
+                f"{_preview(columns, rows)}\n\n"
+                f"Chart shown: {chart.model_dump_json() if chart else 'none'}")
+        resp = await self.client.beta.messages.create(
+            **self._common(), max_tokens=16000, system=SUMMARY_SYSTEM,
+            messages=[{"role": "user", "content": user}],
+        )
+        if resp.stop_reason == "refusal":
+            return "_The model declined to summarise this result._"
+        return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
+# --------------------------------------------------------------------------- Mock
+_REVENUE = "ROUND(SUM(oi.quantity * oi.unit_price * (1 - oi.discount)), 2)"
+
+_MOCK_SQL: list[tuple[re.Pattern, list[str], str]] = [
+    # (pattern, [sql attempts in order], rationale)
+    (re.compile(r"monthly|per month|by month|trend|over time", re.I), [
+        # First attempt is intentionally wrong to demonstrate the retry loop.
+        """SELECT strftime('%Y-%m', o.order_date) AS month, ROUND(SUM(o.total_amount), 2) AS revenue
+FROM orders o WHERE o.status = 'completed' GROUP BY month ORDER BY month""",
+        f"""SELECT strftime('%Y-%m', o.order_date) AS month, {_REVENUE} AS revenue
+FROM orders o JOIN order_items oi ON oi.order_id = o.order_id
+WHERE o.status = 'completed' GROUP BY month ORDER BY month""",
+    ], "Sum completed-order line revenue per calendar month."),
+    (re.compile(r"region", re.I), [
+        f"""SELECT c.region, {_REVENUE} AS revenue, COUNT(DISTINCT o.order_id) AS orders
+FROM orders o JOIN customers c ON c.customer_id = o.customer_id
+JOIN order_items oi ON oi.order_id = o.order_id
+WHERE o.status = 'completed' AND o.order_date >= '2026-01-01'
+GROUP BY c.region ORDER BY revenue DESC""",
+    ], "Join orders to customers for region; 2026 completed orders only."),
+    (re.compile(r"return", re.I), [
+        """SELECT p.category,
+       ROUND(100.0 * SUM(CASE WHEN o.status = 'returned' THEN 1 ELSE 0 END) / COUNT(*), 2) AS return_rate_pct
+FROM orders o JOIN order_items oi ON oi.order_id = o.order_id
+JOIN products p ON p.product_id = oi.product_id
+GROUP BY p.category ORDER BY return_rate_pct DESC""",
+    ], "Share of order lines whose order was returned, per category."),
+    (re.compile(r"top|best[- ]selling|products?", re.I), [
+        f"""SELECT p.name AS product, {_REVENUE} AS revenue
+FROM order_items oi JOIN orders o ON o.order_id = oi.order_id
+JOIN products p ON p.product_id = oi.product_id
+WHERE o.status = 'completed' GROUP BY p.name ORDER BY revenue DESC LIMIT 10""",
+    ], "Rank products by completed revenue, top 10."),
+    (re.compile(r"channel", re.I), [
+        f"""SELECT strftime('%Y-Q', o.order_date) || ((CAST(strftime('%m', o.order_date) AS INTEGER) + 2) / 3) AS quarter,
+       o.channel, {_REVENUE} AS revenue
+FROM orders o JOIN order_items oi ON oi.order_id = o.order_id
+WHERE o.status = 'completed' GROUP BY quarter, o.channel ORDER BY quarter, o.channel""",
+    ], "Quarterly revenue in long format, one series per sales channel."),
+]
+
+
+class MockAnalystLLM:
+    """Deterministic offline stand-in for Claude (demo / tests)."""
+
+    name = "mock (offline)"
+
+    async def generate_sql(self, question: str, schema: str, attempts: Sequence[dict]) -> SQLProposal:
+        for pattern, sqls, why in _MOCK_SQL:
+            if pattern.search(question):
+                return SQLProposal(sql=sqls[min(len(attempts), len(sqls) - 1)], rationale=why)
+        return SQLProposal(sql="SELECT status, COUNT(*) AS orders FROM orders GROUP BY status ORDER BY orders DESC",
+                           rationale="Fallback: order counts by status (mock model has no rule for this question).")
+
+    async def plan_chart(self, question, columns, rows) -> ChartSpec:
+        return heuristic_chart(question, columns, rows)
+
+    async def summarize(self, question, sql, columns, rows, chart, truncated) -> str:
+        if not rows:
+            return "The query returned no rows."
+        spec = chart or heuristic_chart(question, columns, rows)
+        cols = list(columns)
+        if spec.chart_type == "none" or not spec.x or not spec.y:
+            return f"**Answer:** {dict(zip(cols, rows[0]))}"
+        xi, yi = cols.index(spec.x), cols.index(spec.y)
+        if spec.series:
+            si = cols.index(spec.series)
+            totals: dict[str, float] = {}
+            for r in rows:
+                totals[str(r[si])] = totals.get(str(r[si]), 0) + float(r[yi])
+            grand = sum(totals.values()) or 1
+            ranked = sorted(totals.items(), key=lambda kv: -kv[1])
+            lines = [f"- **{k}**: {v:,.2f} ({100 * v / grand:.1f}% of total)" for k, v in ranked]
+            return (f"**{ranked[0][0]}** leads on {spec.y.replace('_', ' ')} with {ranked[0][1]:,.2f} "
+                    f"across the period.\n\n" + "\n".join(lines))
+        vals = [(str(r[xi]), float(r[yi])) for r in rows]
+        total = sum(v for _, v in vals)
+        measure = spec.y.replace("_", " ")
+        if spec.chart_type == "line":
+            first, last = vals[0], vals[-1]
+            peak = max(vals, key=lambda kv: kv[1])
+            change = (last[1] - first[1]) / first[1] * 100 if first[1] else 0
+            return (f"{measure.capitalize()} moved from {first[1]:,.2f} in {first[0]} to {last[1]:,.2f} in "
+                    f"{last[0]} ({change:+.1f}%).\n\n- Peak: **{peak[0]}** at {peak[1]:,.2f}\n"
+                    f"- Total over {len(vals)} periods: {total:,.2f}\n"
+                    f"- Average per period: {total / len(vals):,.2f}")
+        top, bottom = max(vals, key=lambda kv: kv[1]), min(vals, key=lambda kv: kv[1])
+        share = f" ({100 * top[1] / total:.1f}% of the total)" if total and "pct" not in spec.y else ""
+        return (f"**{top[0]}** is highest on {measure} at {top[1]:,.2f}{share}.\n\n"
+                f"- Lowest: {bottom[0]} at {bottom[1]:,.2f}\n"
+                f"- Gap between highest and lowest: {top[1] - bottom[1]:,.2f}\n"
+                f"- {len(vals)} groups compared")
+
+
+def default_llm(force_mock: bool = False) -> AnalystLLM:
+    """Claude when credentials are available, otherwise the offline mock."""
+    if force_mock:
+        return MockAnalystLLM()
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return ClaudeAnalystLLM()
+    return MockAnalystLLM()
