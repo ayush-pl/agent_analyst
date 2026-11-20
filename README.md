@@ -120,6 +120,43 @@ The server works on its own, e.g. in Claude Desktop / Claude Code:
 Claude calls use structured outputs (Pydantic), an explicit `effort` setting, SDK retries
 for transient API errors, and server-side refusal fallback (`fallbacks: "default"`).
 
+## Evaluation
+
+`eval/` holds a 52-question test set over the demo database plus a runner that scores the
+real agent (approval switched off; the read-only guard and retries stay on).
+
+| Category | # | What's checked |
+|---|---|---|
+| easy / medium / hard | 12 / 12 / 10 | The query result matches a hand-written reference query. Column names are ignored, small rounding differences are allowed, and row order is only checked for rankings and time series. |
+| ambiguous | 6 | The query runs and the chart type is sensible (more than one reading is fine) |
+| adversarial | 6 | The database is unchanged (its hash is compared before and after), and whether the model declined or the guard caught it |
+| unanswerable | 6 | The agent declines instead of guessing |
+
+Also reported: correct on first try, retry success rate, chart appropriateness,
+**summary grounding** (every number in the summary must trace to a result cell or a simple
+total, difference or percentage of them), latency p50/p95, tokens and cost per question.
+
+```bash
+# open-source model, no API key (llama.cpp on CPU)
+pip install "llama-cpp-python[server]"
+huggingface-cli download Qwen/Qwen2.5-Coder-7B-Instruct-GGUF qwen2.5-coder-7b-instruct-q4_k_m.gguf --local-dir models
+python -m llama_cpp.server --model models/qwen2.5-coder-7b-instruct-q4_k_m.gguf \
+    --model_alias qwen2.5-coder-7b-instruct --n_ctx 8192 --port 8000 &
+python -m eval.run_eval --llm local
+
+python -m eval.run_eval --llm claude --repeats 3      # Claude, 3 repeats for variance
+python -m eval.run_eval --llm local --ids e01,h01     # subset; --category hard; --limit 5
+python -m eval.report eval/runs/<run>                 # rebuild a scorecard
+```
+
+Each run writes `results.jsonl` (one line per question: SQL, attempts, result, summary and scores),
+`scorecard.md` / `scorecard.json`, and the charts. Re-running with the same `--out`
+resumes where it stopped. `tests/test_eval.py` checks the harness itself: a model that
+returns the reference SQL must score 100%.
+
+The agent can run on any backend: set `ANALYST_LLM=claude|local|mock` (`local` = any
+OpenAI-compatible server, configured with `ANALYST_LOCAL_URL` / `ANALYST_LOCAL_MODEL`).
+
 ## Project layout
 
 ```
@@ -134,6 +171,11 @@ analyst/
 demo/
   seed_db.py      deterministic sample e-commerce database
   run_demo.py     interactive CLI demo + Markdown report
+eval/
+  dataset.py      52 questions with reference SQL
+  run_eval.py     runs the agent over the set, scores each case
+  scoring.py      result-set matching, summary grounding
+  report.py       scorecard.md / scorecard.json
 tests/            end-to-end tests (approve / edit / reject / retry / guard), no API key needed
 ```
 

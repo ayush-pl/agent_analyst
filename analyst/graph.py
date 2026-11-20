@@ -11,6 +11,8 @@
                                      make_chart → summarize → END
                          (retries exhausted → fail → END)
 
+* If the SQL model says the data can't answer the question (or it asks to modify
+  data), the run ends with ``status="unanswerable"`` without running anything.
 * ``generate_sql`` calls the **SQL model as a tool** (``sql_model_tool``) with the
   question, the schema and every previous failed attempt + its error.
 * ``human_approval`` pauses the graph with ``interrupt()``; resume it with
@@ -46,7 +48,7 @@ class AnalystState(TypedDict, total=False):
     chart_spec: dict
     chart_path: Optional[str]
     summary: str
-    status: Literal["running", "done", "rejected", "failed"]
+    status: Literal["running", "done", "rejected", "failed", "unanswerable"]
     events: list[str]             # human-readable trace
 
 
@@ -86,6 +88,12 @@ def build_graph(llm: AnalystLLM, tools: MCPToolbox, checkpointer: Any = None):
     async def generate_sql(state: AnalystState) -> Command:
         attempts = state.get("attempts", [])
         out = await sql_model_tool(state["question"], state["schema"], attempts)
+        # An empty query is also a decline: the model found nothing it could run.
+        if not out.get("answerable", True) or not (out.get("sql") or "").strip():
+            return Command(goto=END, update={
+                "status": "unanswerable", "sql": "", "rationale": out["rationale"],
+                "summary": f"I can't answer this from the available data: {out['rationale']}",
+                "events": _log(state, f"SQL model declined: {out['rationale']}")})
         events = _log(state, f"SQL model proposed query (attempt {len(attempts) + 1})")
         try:
             sql = check_read_only(out["sql"])
@@ -182,7 +190,7 @@ def build_graph(llm: AnalystLLM, tools: MCPToolbox, checkpointer: Any = None):
     # ------------------------------------------------------------------ wiring
     g = StateGraph(AnalystState)
     g.add_node("load_schema", load_schema)
-    g.add_node("generate_sql", generate_sql, destinations=("human_approval", "execute_sql", "generate_sql", "fail"))
+    g.add_node("generate_sql", generate_sql, destinations=("human_approval", "execute_sql", "generate_sql", "fail", END))
     g.add_node("human_approval", human_approval, destinations=("execute_sql", "human_approval", END))
     g.add_node("execute_sql", execute_sql, destinations=("make_chart", "generate_sql", "fail"))
     g.add_node("make_chart", make_chart)

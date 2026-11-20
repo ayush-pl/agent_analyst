@@ -20,8 +20,11 @@ DEFAULT_MODEL = os.environ.get("ANALYST_MODEL", "claude-opus-5-5")
 
 # --------------------------------------------------------------------------- schemas
 class SQLProposal(BaseModel):
-    sql: str = Field(description="A single read-only SQLite SELECT/WITH query.")
-    rationale: str = Field(description="One or two sentences explaining the approach.")
+    answerable: bool = Field(default=True, description=(
+        "False if the database cannot answer the question (data not present) or the request asks to "
+        "modify data; then leave sql empty and explain why in rationale."))
+    sql: str = Field(description="A single read-only SQLite SELECT/WITH query (empty if not answerable).")
+    rationale: str = Field(description="One or two sentences explaining the approach, or why it cannot be answered.")
 
 
 class ChartSpec(BaseModel):
@@ -99,7 +102,10 @@ Rules:
   reasonable top N (default 10) unless the question asks otherwise.
 - Revenue = quantity * unit_price * (1 - discount) on order_items, counting only
   completed orders unless the question says otherwise.
-- If previous attempts failed, read the database error carefully and fix the cause."""
+- If previous attempts failed, read the database error carefully and fix the cause.
+- If the schema does not contain the data needed (e.g. marketing spend, NPS, employees), or the
+  request asks to insert/update/delete/create/drop anything, set answerable=false, leave sql
+  empty and explain briefly. Do not guess with unrelated columns."""
 
 CHART_SYSTEM = """You choose the chart for a query result in an analytics report.
 Choose chart_type from: line (change over time), bar (compare a few categories or grouped
@@ -127,6 +133,14 @@ class ClaudeAnalystLLM:
         self.model = model
         self.effort = effort
         self.name = f"claude:{model}"
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+
+    def _track(self, resp: Any) -> None:
+        u = resp.usage
+        self.usage["calls"] += 1
+        self.usage["input_tokens"] += (u.input_tokens or 0) + (getattr(u, "cache_read_input_tokens", 0) or 0) \
+            + (getattr(u, "cache_creation_input_tokens", 0) or 0)
+        self.usage["output_tokens"] += u.output_tokens or 0
 
     def _common(self) -> dict[str, Any]:
         # Server-side refusal fallback: if a safety classifier declines, the API
@@ -143,6 +157,7 @@ class ClaudeAnalystLLM:
             **self._common(), max_tokens=max_tokens, system=system,
             messages=[{"role": "user", "content": user}], output_format=schema,
         )
+        self._track(resp)
         if resp.stop_reason == "refusal":
             raise RuntimeError("The model declined this request.")
         if resp.stop_reason == "max_tokens" or resp.parsed_output is None:
@@ -171,6 +186,7 @@ class ClaudeAnalystLLM:
             **self._common(), max_tokens=16000, system=SUMMARY_SYSTEM,
             messages=[{"role": "user", "content": user}],
         )
+        self._track(resp)
         if resp.stop_reason == "refusal":
             return "_The model declined to summarise this result._"
         return "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -222,6 +238,7 @@ class MockAnalystLLM:
     """Deterministic offline stand-in for Claude (demo / tests)."""
 
     name = "mock (offline)"
+    usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
 
     async def generate_sql(self, question: str, schema: str, attempts: Sequence[dict]) -> SQLProposal:
         for pattern, sqls, why in _MOCK_SQL:
@@ -270,10 +287,82 @@ class MockAnalystLLM:
                 f"- {len(vals)} groups compared")
 
 
+# --------------------------------------------------------------------------- Local open-source model
+# Constrained decoding must force the model to state answerable explicitly.
+_SQL_SCHEMA = {**SQLProposal.model_json_schema(), "required": ["answerable", "sql", "rationale"]}
+
+
+class LocalAnalystLLM:
+    """Open-source model served locally behind an OpenAI-compatible endpoint.
+
+    Tested with ``llama-cpp-python[server]`` running Qwen2.5-Coder-7B-Instruct (GGUF):
+
+        python -m llama_cpp.server --model models/qwen2.5-coder-7b-instruct-q4_k_m.gguf --n_ctx 8192
+
+    Structured outputs use the server's JSON-schema constrained decoding
+    (``response_format={"type": "json_object", "schema": ...}``), so replies always
+    parse into the same Pydantic models the Claude backend returns. Also works
+    with Ollama / vLLM / any server that honours that ``response_format``.
+    """
+
+    def __init__(self, base_url: str | None = None, model: str | None = None, timeout: float = 900):
+        import httpx
+
+        self.base_url = (base_url or os.environ.get("ANALYST_LOCAL_URL", "http://127.0.0.1:8000/v1")).rstrip("/")
+        self.model = model or os.environ.get("ANALYST_LOCAL_MODEL", "qwen2.5-coder-7b-instruct")
+        self.name = f"local:{self.model}"
+        self.http = httpx.AsyncClient(timeout=timeout)
+        self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+
+    async def _chat(self, system: str, user: str, schema: type[BaseModel] | dict | None, max_tokens: int) -> str:
+        body: dict[str, Any] = {
+            "model": self.model, "max_tokens": max_tokens, "temperature": 0,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        }
+        if schema is not None:
+            js = schema if isinstance(schema, dict) else schema.model_json_schema()
+            body["response_format"] = {"type": "json_object", "schema": js}
+        r = await self.http.post(f"{self.base_url}/chat/completions", json=body)
+        r.raise_for_status()
+        data = r.json()
+        u = data.get("usage") or {}
+        self.usage["calls"] += 1
+        self.usage["input_tokens"] += u.get("prompt_tokens", 0)
+        self.usage["output_tokens"] += u.get("completion_tokens", 0)
+        return data["choices"][0]["message"]["content"] or ""
+
+    async def generate_sql(self, question: str, schema: str, attempts: Sequence[dict]) -> SQLProposal:
+        # Schema goes in the system prompt so the prefix is identical across SQL calls (KV-cache reuse).
+        system = f"{SQL_SYSTEM}\n\n<schema>\n{schema}\n</schema>"
+        user = f"<question>{question}</question>"
+        if attempts:
+            hist = "\n\n".join(f"Attempt {i + 1}:\n{a['sql']}\nError: {a['error']}" for i, a in enumerate(attempts))
+            user += f"\n\n<previous_failed_attempts>\n{hist}\n</previous_failed_attempts>\nWrite a corrected query."
+        user += "\n\nReply with JSON: {\"answerable\": bool, \"sql\": str, \"rationale\": str}."
+        return SQLProposal.model_validate_json(await self._chat(system, user, _SQL_SCHEMA, 700))
+
+    async def plan_chart(self, question, columns, rows) -> ChartSpec:
+        user = (f"Question: {question}\n\nResult (first row is the header):\n{_preview(columns, rows, 25)}\n\n"
+                "Reply with JSON: {\"chart_type\": \"bar|hbar|line|none\", \"x\": col, \"y\": col, "
+                "\"series\": col or null, \"title\": str, \"y_label\": str}.")
+        return ChartSpec.model_validate_json(await self._chat(CHART_SYSTEM, user, ChartSpec, 300))
+
+    async def summarize(self, question, sql, columns, rows, chart, truncated) -> str:
+        user = (f"Question: {question}\n\nSQL:\n{sql}\n\n"
+                f"Result ({len(rows)} rows{', truncated' if truncated else ''}; first row is the header):\n"
+                f"{_preview(columns, rows, 40)}")
+        return (await self._chat(SUMMARY_SYSTEM, user, None, 350)).strip()
+
+
 def default_llm(force_mock: bool = False) -> AnalystLLM:
-    """Claude when credentials are available, otherwise the offline mock."""
-    if force_mock:
+    """Pick the backend: ANALYST_LLM=claude|local|mock, else Claude if credentials exist, else mock."""
+    choice = os.environ.get("ANALYST_LLM", "").lower()
+    if force_mock or choice == "mock":
         return MockAnalystLLM()
+    if choice == "local":
+        return LocalAnalystLLM()
+    if choice == "claude":
+        return ClaudeAnalystLLM()
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return ClaudeAnalystLLM()
     return MockAnalystLLM()

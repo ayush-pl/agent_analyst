@@ -6,3 +6,5 @@ outputs/
 demo/*.db
 .pytest_cache/
 *.egg-info/
+eval/runs/pilot-*
+models/
