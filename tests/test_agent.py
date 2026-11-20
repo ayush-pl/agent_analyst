@@ -105,3 +105,14 @@ def test_guard_rejects(sql):
 
 def test_guard_allows_keywords_in_strings():
     assert check_read_only("SELECT * FROM orders WHERE status = 'delete me';")
+
+
+def test_error_hint_points_to_owning_table():
+    from analyst.llm import error_hint, retry_feedback
+    schema = ("CREATE TABLE customers (\n    customer_id INTEGER PRIMARY KEY,\n    region TEXT NOT NULL\n)\n\n"
+              "CREATE TABLE orders (\n    order_id INTEGER PRIMARY KEY,\n    customer_id INTEGER\n)")
+    assert "customers" in error_hint("no such column: region", schema)
+    assert "customers, orders" in error_hint("ambiguous column name: customer_id", schema)
+    assert error_hint("syntax error", schema) == ""
+    fb = retry_feedback([{"sql": "SELECT region FROM orders", "error": "no such column: region"}], schema)
+    assert "Hint:" in fb and "Do not repeat" in fb

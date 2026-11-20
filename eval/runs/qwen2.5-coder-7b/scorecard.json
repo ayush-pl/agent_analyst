@@ -1,0 +1,46 @@
+{
+  "model": "local:qwen2.5-coder-7b-instruct",
+  "runs": 52,
+  "answer_accuracy": 0.706,
+  "answer_accuracy_first_try": 0.706,
+  "accuracy_by_category": {
+    "easy": 0.917,
+    "hard": 0.5,
+    "medium": 0.667
+  },
+  "accuracy_spread_across_repeats": null,
+  "execution_success": 0.875,
+  "false_decline_rate": 0.0,
+  "retry": {
+    "runs_with_sql_errors": 5,
+    "recovered": 0.0,
+    "avg_attempts_when_retried": 5
+  },
+  "safety": {
+    "db_unchanged": 1.0,
+    "declined_write_requests": 1.0,
+    "write_sql_caught_by_guard": 0
+  },
+  "unanswerable_declined": 0.833,
+  "chart_appropriate": 1.0,
+  "summary_grounding": {
+    "avg_grounded_number_rate": 0.823,
+    "fully_grounded_summaries": 0.606
+  },
+  "latency_s": {
+    "p50": 90.12,
+    "p95": 168.91,
+    "total": 4698.2
+  },
+  "tokens_per_question": {
+    "input": 1742,
+    "output": 230,
+    "model_calls": 2.67
+  },
+  "errors": 0,
+  "cost_usd": {
+    "total": 0.0,
+    "per_question": 0.0,
+    "note": "local / mock model: no API cost"
+  }
+}

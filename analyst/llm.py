@@ -122,6 +122,65 @@ Given the question, the SQL that was run and its result, write a concise summary
   partial periods) briefly. Do not restate the SQL. Keep it under 150 words."""
 
 
+_CREATE_RE = re.compile(r"CREATE TABLE\s+\"?(\w+)\"?\s*\((.*?)\n\)", re.S | re.I)
+
+
+def schema_columns(schema: str) -> dict[str, list[str]]:
+    """Parse ``CREATE TABLE`` blocks in a formatted schema into {table: [columns]}."""
+    out: dict[str, list[str]] = {}
+    for table, body in _CREATE_RE.findall(schema):
+        cols = []
+        for line in body.split(","):
+            m = re.match(r"\s*\"?(\w+)\"?\s+\w", line)
+            if m and m.group(1).upper() not in {"PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT"}:
+                cols.append(m.group(1))
+        out[table] = cols
+    return out
+
+
+def error_hint(error: str, schema: str) -> str:
+    """Turn a raw database error into a concrete fix hint using the schema.
+
+    Small models often re-send the same broken query when they only see the raw
+    error; naming the table that actually holds a column fixes most retries.
+    """
+    tables = schema_columns(schema)
+    m = re.search(r"no such column: (?:\w+\.)?(\w+)", error)
+    if m:
+        col = m.group(1)
+        owners = [t for t, cols in tables.items() if col in cols]
+        if owners:
+            return (f"Column `{col}` exists only in table(s) {', '.join(owners)}. JOIN that table "
+                    f"(via its id column) and reference it as <table_or_alias>.{col}; make sure every "
+                    "alias you use is defined in FROM/JOIN.")
+        return f"No table has a column `{col}`. Use only columns listed in the schema."
+    m = re.search(r"ambiguous column name: (?:\w+\.)?(\w+)", error)
+    if m:
+        col = m.group(1)
+        owners = [t for t, cols in tables.items() if col in cols]
+        return (f"Column `{col}` exists in several joined tables ({', '.join(owners)}). Give every table an "
+                f"alias and prefix EVERY column with it (e.g. oi.{col}).")
+    m = re.search(r"no such table: (\w+)", error)
+    if m:
+        return f"There is no table `{m.group(1)}`. Available tables: {', '.join(tables)}."
+    return ""
+
+
+def retry_feedback(attempts: Sequence[dict], schema: str) -> str:
+    """Prompt block describing failed attempts, with fix hints, for the SQL model."""
+    lines = []
+    for i, a in enumerate(attempts):
+        hint = error_hint(str(a.get("error", "")), schema)
+        lines.append(f"Attempt {i + 1}:\n```sql\n{a['sql']}\n```\nError: {a['error']}"
+                     + (f"\nHint: {hint}" if hint else ""))
+    return (f"<previous_failed_attempts>\n" + "\n\n".join(lines) + "\n</previous_failed_attempts>\n"
+            "These queries FAILED. Do not repeat them: write a different, corrected query that fixes the cause.")
+
+
+def _norm_sql(sql: str) -> str:
+    return " ".join(sql.lower().replace(";", " ").split())
+
+
 class ClaudeAnalystLLM:
     """Claude-backed SQL model, chart planner and summary writer."""
 
@@ -167,10 +226,7 @@ class ClaudeAnalystLLM:
     async def generate_sql(self, question: str, schema: str, attempts: Sequence[dict]) -> SQLProposal:
         parts = [f"<schema>\n{schema}\n</schema>", f"<question>{question}</question>"]
         if attempts:
-            hist = "\n\n".join(
-                f"Attempt {i + 1}:\n```sql\n{a['sql']}\n```\nError: {a['error']}" for i, a in enumerate(attempts))
-            parts.append(f"<previous_failed_attempts>\n{hist}\n</previous_failed_attempts>\n"
-                         "Write a corrected query that avoids these errors.")
+            parts.append(retry_feedback(attempts, schema))
         return await self._parse(SQL_SYSTEM, "\n\n".join(parts), SQLProposal)
 
     async def plan_chart(self, question, columns, rows) -> ChartSpec:
@@ -314,9 +370,10 @@ class LocalAnalystLLM:
         self.http = httpx.AsyncClient(timeout=timeout)
         self.usage = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
 
-    async def _chat(self, system: str, user: str, schema: type[BaseModel] | dict | None, max_tokens: int) -> str:
+    async def _chat(self, system: str, user: str, schema: type[BaseModel] | dict | None, max_tokens: int,
+                    temperature: float = 0) -> str:
         body: dict[str, Any] = {
-            "model": self.model, "max_tokens": max_tokens, "temperature": 0,
+            "model": self.model, "max_tokens": max_tokens, "temperature": temperature, "seed": 7,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         }
         if schema is not None:
@@ -336,10 +393,15 @@ class LocalAnalystLLM:
         system = f"{SQL_SYSTEM}\n\n<schema>\n{schema}\n</schema>"
         user = f"<question>{question}</question>"
         if attempts:
-            hist = "\n\n".join(f"Attempt {i + 1}:\n{a['sql']}\nError: {a['error']}" for i, a in enumerate(attempts))
-            user += f"\n\n<previous_failed_attempts>\n{hist}\n</previous_failed_attempts>\nWrite a corrected query."
+            user += "\n\n" + retry_feedback(attempts, schema)
         user += "\n\nReply with JSON: {\"answerable\": bool, \"sql\": str, \"rationale\": str}."
-        return SQLProposal.model_validate_json(await self._chat(system, user, _SQL_SCHEMA, 700))
+        proposal = SQLProposal.model_validate_json(await self._chat(system, user, _SQL_SCHEMA, 700))
+        # Greedy decoding tends to reproduce a failed query verbatim; resample once if it did.
+        tried = {_norm_sql(a["sql"]) for a in attempts}
+        if proposal.sql and _norm_sql(proposal.sql) in tried:
+            proposal = SQLProposal.model_validate_json(
+                await self._chat(system, user, _SQL_SCHEMA, 700, temperature=0.7))
+        return proposal
 
     async def plan_chart(self, question, columns, rows) -> ChartSpec:
         user = (f"Question: {question}\n\nResult (first row is the header):\n{_preview(columns, rows, 25)}\n\n"
