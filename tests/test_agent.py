@@ -116,3 +116,14 @@ def test_error_hint_points_to_owning_table():
     assert error_hint("syntax error", schema) == ""
     fb = retry_feedback([{"sql": "SELECT region FROM orders", "error": "no such column: region"}], schema)
     assert "Hint:" in fb and "Do not repeat" in fb
+
+
+def test_long_format_result_gets_series():
+    from analyst.graph import _infer_series
+    from analyst.llm import ChartSpec
+    cols = ["month", "revenue", "channel"]
+    rows = [["2026-01", 1.0, "web"], ["2026-01", 2.0, "mobile"], ["2026-02", 3.0, "web"], ["2026-02", 4.0, "mobile"]]
+    spec = _infer_series(ChartSpec(chart_type="line", x="month", y="revenue"), cols, rows)
+    assert spec.series == "channel"
+    flat = _infer_series(ChartSpec(chart_type="bar", x="month", y="revenue"), cols[:2], [r[:2] for r in rows[::2]])
+    assert flat.series is None

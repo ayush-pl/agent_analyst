@@ -68,6 +68,27 @@ def _format_schema(payload: dict) -> str:
     return f"-- dialect: {payload.get('dialect', 'sqlite')}\n\n" + "\n\n".join(blocks)
 
 
+def _infer_series(spec, cols: list, rows: list):
+    """Long-format results (x repeats, plus a category column) need a series split.
+
+    Small chart planners often omit ``series``; drawing such data as one line joins
+    every category into a zigzag, so pick the category column ourselves.
+    """
+    if spec.chart_type in ("none", "hbar") or spec.series or spec.x not in cols or not rows:
+        return spec
+    xi = cols.index(spec.x)
+    xs = [r[xi] for r in rows]
+    if len(set(xs)) == len(xs):
+        return spec
+    for i, c in enumerate(cols):
+        if c in (spec.x, spec.y):
+            continue
+        vals = {r[i] for r in rows}
+        if all(isinstance(v, str) for v in vals) and 1 < len(vals) <= 8:
+            return spec.model_copy(update={"series": c})
+    return spec
+
+
 def build_graph(llm: AnalystLLM, tools: MCPToolbox, checkpointer: Any = None):
     """Compile the analyst graph. A checkpointer is required for human approval."""
 
@@ -160,6 +181,7 @@ def build_graph(llm: AnalystLLM, tools: MCPToolbox, checkpointer: Any = None):
         except Exception as e:  # noqa: BLE001 - a chart problem should never sink the answer
             events.append(f"chart planner failed ({e}); using heuristic")
             spec = heuristic_chart(state["question"], cols, rows)
+        spec = _infer_series(spec, cols, rows)
         path = None
         if spec.chart_type != "none":
             out = str(Path(state.get("output_dir", "outputs")).resolve() / f"{_slug(state['question'])}.png")

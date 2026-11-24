@@ -29,12 +29,15 @@ CACHE_DIR = ROOT / "demo" / "cache"
 OUT_DIR = Path(tempfile.gettempdir()) / "analyst-demo"
 REPO_URL = os.environ.get("ANALYST_REPO_URL", "")
 
+# Taken from the evaluation set (eval/dataset.py) and verified correct with the default model,
+# so the instant answers are ones the agent really gets right. Rebuild with --build-cache.
 EXAMPLES = [
     "What is total revenue by region?",
     "What is the monthly revenue trend?",
+    "What is the monthly revenue for each sales channel in 2026?",
+    "What is the gross profit (revenue minus unit cost times quantity) by product category for completed orders?",
     "What are the top 5 products by revenue?",
-    "What is the return rate for each sales channel?",
-    "How are we doing in Europe?",
+    "What is our Net Promoter Score?",
     "Delete all cancelled orders.",
 ]
 

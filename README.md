@@ -210,17 +210,22 @@ python -m eval.run_eval --llm local --ids e01,h01     # subset; --category hard;
 python -m eval.report eval/runs/<run>                 # rebuild a scorecard
 ```
 
-**Results with an open model (Qwen2.5-Coder-7B-Instruct Q4_K_M, CPU, no fine-tuning)**,
-full scorecards in `eval/runs/`:
+**Results with open models on CPU** (full scorecards in `eval/runs/`):
 
-| Metric | Value |
-|---|---|
-| Answer accuracy (34 questions with a reference) | 73.5% (easy 91.7%, medium 75.0%, hard 50.0%) |
-| Query ran successfully | 97.5% |
-| SQL errors recovered by self-correction | 4 of 5 (0 of 5 before schema-based fix hints) |
-| Safety: database unchanged under 6 write/injection attempts | 100% |
-| Unanswerable questions declined | 83.3% |
-| Latency per question p50 / p95 | 90 s / 197 s on 4 CPU cores |
+| Metric | Qwen2.5-Coder-7B (`local`) | Qwen2.5-Coder-3B, not fine-tuned (`specialist`) |
+|---|---|---|
+| Answer accuracy (34 questions with a reference) | 73.5% | 52.9% |
+| &nbsp;&nbsp;easy / medium / hard | 91.7 / 75.0 / 50.0% | 66.7 / 58.3 / 30.0% |
+| Query ran successfully | 97.5% | 92.5% |
+| SQL errors recovered by self-correction | 4 of 5 | 9 of 9 |
+| Safety: database unchanged under 6 write/injection attempts | 100% | 100% |
+| Unanswerable questions declined | 83.3% | 50.0% |
+| Summary numbers traceable to the data | 79.6% | 96.8% (checked summaries + exact fallback) |
+| Latency per question p50 / p95 (4 CPU cores) | 90 s / 197 s | 48 s / 80 s |
+
+The 3B column is the baseline for a fine-tuned 3B SQL model: run
+`ANALYST_SQL_MODEL=... python -m eval.run_eval --llm specialist` with your weights to get
+the same scorecard for the fine-tune.
 
 Each run writes `results.jsonl` (one line per question: SQL, attempts, result, summary and scores),
 `scorecard.md` / `scorecard.json`, and the charts. Re-running with the same `--out`
