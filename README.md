@@ -151,7 +151,7 @@ ANALYST_LLM=mock python app.py     # UI only, no model
 **Hosting: Hugging Face Spaces (free).** The repo has a `Dockerfile` that builds llama.cpp,
 seeds the demo database and downloads the models at build time. Free CPU Spaces have
 2 vCPU and 16 GB RAM, which fits two 3B Q4 models (~4 GB), and the URL is public and permanent.
-The Space sleeps after 48 hours without visitors and wakes on the next visit (about a minute).
+A live question takes 1–2 minutes there (measured with the image limited to 2 CPUs); the example buttons are instant. The Space sleeps after 48 hours without visitors and wakes on the next visit (about a minute).
 
 ```bash
 pip install huggingface_hub && huggingface-cli login        # a write token

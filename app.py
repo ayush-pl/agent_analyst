@@ -205,7 +205,7 @@ def build_ui():
             "Ask a business question in plain English. A **LangGraph** agent writes SQL with a "
             "**fine-tuned text-to-SQL model**, waits for **your approval**, runs it through **MCP tools** "
             "on a read-only database, corrects its own failed queries, then charts and summarizes the result.  \n"
-            f"{model_line} · runs on CPU, so a live question takes about a minute."
+            f"{model_line} · runs on a free 2-CPU server, so a live question takes 1–2 minutes (the examples are instant)."
             + (f" · [Source code]({REPO_URL})" if REPO_URL else ""))
         thread = gr.State(None)
         proposed = gr.State(None)

@@ -36,7 +36,7 @@ text-to-SQL model (Qwen2.5-Coder-3B + QLoRA on Spider/BIRD), waits for your appr
 through MCP tools on a read-only SQLite database, corrects its own failed queries using the
 database error, then charts and summarizes the result.
 {repo_line}
-Runs entirely on CPU with llama.cpp, so a live question takes about a minute. The example
+Runs entirely on CPU with llama.cpp, so a live question takes 1–2 minutes. The example
 buttons show answers the same agent produced earlier.
 """
 
