@@ -138,17 +138,39 @@ def schema_columns(schema: str) -> dict[str, list[str]]:
     return out
 
 
-def error_hint(error: str, schema: str) -> str:
+def sql_aliases(sql: str, tables: Sequence[str]) -> dict[str, str]:
+    """{alias_or_table: table} for the FROM/JOIN clauses of a query."""
+    out: dict[str, str] = {}
+    names = {t.lower(): t for t in tables}
+    for m in re.finditer(r"\b(?:FROM|JOIN)\s+\"?(\w+)\"?(?:\s+(?:AS\s+)?(\w+))?", sql, re.I):
+        t = names.get(m.group(1).lower())
+        if not t:
+            continue
+        out[t] = t
+        alias = m.group(2)
+        if alias and alias.upper() not in {"ON", "WHERE", "JOIN", "INNER", "LEFT", "RIGHT", "CROSS", "GROUP",
+                                           "ORDER", "LIMIT", "USING", "NATURAL", "OUTER", "FULL"}:
+            out[alias] = t
+    return out
+
+
+def error_hint(error: str, schema: str, sql: str = "") -> str:
     """Turn a raw database error into a concrete fix hint using the schema.
 
     Small models often re-send the same broken query when they only see the raw
     error; naming the table that actually holds a column fixes most retries.
     """
     tables = schema_columns(schema)
-    m = re.search(r"no such column: (?:\w+\.)?(\w+)", error)
+    m = re.search(r"no such column: (?:(\w+)\.)?(\w+)", error)
     if m:
-        col = m.group(1)
+        alias, col = m.group(1), m.group(2)
         owners = [t for t, cols in tables.items() if col in cols]
+        aliases = sql_aliases(sql, list(tables)) if sql else {}
+        if alias and alias in aliases and owners:
+            used = [a for a, t in aliases.items() if t in owners and a != t] or owners
+            return (f"In your query `{alias}` is table {aliases[alias]}, which has no column `{col}`. "
+                    f"`{col}` is in {', '.join(owners)}: write it as {used[0]}.{col}"
+                    + ("" if any(t in aliases.values() for t in owners) else f" and JOIN {owners[0]}") + ".")
         if owners:
             return (f"Column `{col}` exists only in table(s) {', '.join(owners)}. JOIN that table "
                     f"(via its id column) and reference it as <table_or_alias>.{col}; make sure every "
@@ -170,7 +192,7 @@ def retry_feedback(attempts: Sequence[dict], schema: str) -> str:
     """Prompt block describing failed attempts, with fix hints, for the SQL model."""
     lines = []
     for i, a in enumerate(attempts):
-        hint = error_hint(str(a.get("error", "")), schema)
+        hint = error_hint(str(a.get("error", "")), schema, a.get("sql", ""))
         lines.append(f"Attempt {i + 1}:\n```sql\n{a['sql']}\n```\nError: {a['error']}"
                      + (f"\nHint: {hint}" if hint else ""))
     return (f"<previous_failed_attempts>\n" + "\n\n".join(lines) + "\n</previous_failed_attempts>\n"
@@ -290,6 +312,54 @@ WHERE o.status = 'completed' GROUP BY quarter, o.channel ORDER BY quarter, o.cha
 ]
 
 
+def _additive(measure: str) -> bool:
+    """Totals and shares only make sense for additive measures (revenue, counts), not rates."""
+    return not re.search(r"rate|pct|percent|avg|average|mean|ratio|share|margin|growth|price", measure, re.I)
+
+
+def fact_summary(question: str, columns: Sequence[str], rows: Sequence[Sequence[Any]],
+                 chart: ChartSpec | None = None) -> str:
+    """Deterministic summary computed from the result: every number is exact."""
+    if not rows:
+        return "The query returned no rows."
+    spec = chart or heuristic_chart(question, columns, rows)
+    cols = list(columns)
+    if spec.chart_type == "none" or not spec.x or not spec.y or len(rows) == 1:
+        def fmt(v: Any) -> str:
+            return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}" if isinstance(v, int) else str(v)
+        parts = [f"{c.replace('_', ' ')}: **{fmt(v)}**" for c, v in zip(cols, rows[0])]
+        extra = f"\n\n({len(rows)} rows; showing the first)" if len(rows) > 1 else ""
+        return "**Answer:** " + " · ".join(parts) + extra
+    xi, yi = cols.index(spec.x), cols.index(spec.y)
+    if spec.series:
+        si = cols.index(spec.series)
+        totals: dict[str, float] = {}
+        for r in rows:
+            totals[str(r[si])] = totals.get(str(r[si]), 0) + float(r[yi])
+        grand = sum(totals.values()) or 1
+        ranked = sorted(totals.items(), key=lambda kv: -kv[1])
+        lines = [f"- **{k}**: {v:,.2f} ({100 * v / grand:.1f}% of total)" for k, v in ranked]
+        return (f"**{ranked[0][0]}** leads on {spec.y.replace('_', ' ')} with {ranked[0][1]:,.2f} "
+                f"across the period.\n\n" + "\n".join(lines))
+    vals = [(str(r[xi]), float(r[yi])) for r in rows]
+    total = sum(v for _, v in vals)
+    measure = spec.y.replace("_", " ")
+    if spec.chart_type == "line":
+        first, last = vals[0], vals[-1]
+        peak = max(vals, key=lambda kv: kv[1])
+        change = (last[1] - first[1]) / first[1] * 100 if first[1] else 0
+        return (f"{measure.capitalize()} moved from {first[1]:,.2f} in {first[0]} to {last[1]:,.2f} in "
+                f"{last[0]} ({change:+.1f}%).\n\n- Peak: **{peak[0]}** at {peak[1]:,.2f}\n"
+                f"- Total over {len(vals)} periods: {total:,.2f}\n"
+                f"- Average per period: {total / len(vals):,.2f}")
+    top, bottom = max(vals, key=lambda kv: kv[1]), min(vals, key=lambda kv: kv[1])
+    share = f" ({100 * top[1] / total:.1f}% of the total)" if total and _additive(spec.y) else ""
+    return (f"**{top[0]}** is highest on {measure} at {top[1]:,.2f}{share}.\n\n"
+            f"- Lowest: {bottom[0]} at {bottom[1]:,.2f}\n"
+            f"- Gap between highest and lowest: {top[1] - bottom[1]:,.2f}\n"
+            f"- {len(vals)} groups compared")
+
+
 class MockAnalystLLM:
     """Deterministic offline stand-in for Claude (demo / tests)."""
 
@@ -307,40 +377,7 @@ class MockAnalystLLM:
         return heuristic_chart(question, columns, rows)
 
     async def summarize(self, question, sql, columns, rows, chart, truncated) -> str:
-        if not rows:
-            return "The query returned no rows."
-        spec = chart or heuristic_chart(question, columns, rows)
-        cols = list(columns)
-        if spec.chart_type == "none" or not spec.x or not spec.y:
-            return f"**Answer:** {dict(zip(cols, rows[0]))}"
-        xi, yi = cols.index(spec.x), cols.index(spec.y)
-        if spec.series:
-            si = cols.index(spec.series)
-            totals: dict[str, float] = {}
-            for r in rows:
-                totals[str(r[si])] = totals.get(str(r[si]), 0) + float(r[yi])
-            grand = sum(totals.values()) or 1
-            ranked = sorted(totals.items(), key=lambda kv: -kv[1])
-            lines = [f"- **{k}**: {v:,.2f} ({100 * v / grand:.1f}% of total)" for k, v in ranked]
-            return (f"**{ranked[0][0]}** leads on {spec.y.replace('_', ' ')} with {ranked[0][1]:,.2f} "
-                    f"across the period.\n\n" + "\n".join(lines))
-        vals = [(str(r[xi]), float(r[yi])) for r in rows]
-        total = sum(v for _, v in vals)
-        measure = spec.y.replace("_", " ")
-        if spec.chart_type == "line":
-            first, last = vals[0], vals[-1]
-            peak = max(vals, key=lambda kv: kv[1])
-            change = (last[1] - first[1]) / first[1] * 100 if first[1] else 0
-            return (f"{measure.capitalize()} moved from {first[1]:,.2f} in {first[0]} to {last[1]:,.2f} in "
-                    f"{last[0]} ({change:+.1f}%).\n\n- Peak: **{peak[0]}** at {peak[1]:,.2f}\n"
-                    f"- Total over {len(vals)} periods: {total:,.2f}\n"
-                    f"- Average per period: {total / len(vals):,.2f}")
-        top, bottom = max(vals, key=lambda kv: kv[1]), min(vals, key=lambda kv: kv[1])
-        share = f" ({100 * top[1] / total:.1f}% of the total)" if total and "pct" not in spec.y else ""
-        return (f"**{top[0]}** is highest on {measure} at {top[1]:,.2f}{share}.\n\n"
-                f"- Lowest: {bottom[0]} at {bottom[1]:,.2f}\n"
-                f"- Gap between highest and lowest: {top[1] - bottom[1]:,.2f}\n"
-                f"- {len(vals)} groups compared")
+        return fact_summary(question, columns, rows, chart)
 
 
 # --------------------------------------------------------------------------- Local open-source model
@@ -417,12 +454,15 @@ class LocalAnalystLLM:
 
 
 def default_llm(force_mock: bool = False) -> AnalystLLM:
-    """Pick the backend: ANALYST_LLM=claude|local|mock, else Claude if credentials exist, else mock."""
+    """Pick the backend: ANALYST_LLM=claude|local|specialist|mock, else Claude if credentials exist, else mock."""
     choice = os.environ.get("ANALYST_LLM", "").lower()
     if force_mock or choice == "mock":
         return MockAnalystLLM()
     if choice == "local":
         return LocalAnalystLLM()
+    if choice == "specialist":
+        from analyst.specialist import specialist_from_env
+        return specialist_from_env()
     if choice == "claude":
         return ClaudeAnalystLLM()
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):

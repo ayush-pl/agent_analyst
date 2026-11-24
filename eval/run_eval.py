@@ -2,6 +2,7 @@
 
     python -m eval.run_eval --llm local                       # open model via llama.cpp server
     python -m eval.run_eval --llm claude --repeats 3
+    python -m eval.run_eval --llm specialist                  # fine-tuned SQL model (ANALYST_SQL_MODEL) in-process
     python -m eval.run_eval --llm mock                        # check the harness itself
     python -m eval.run_eval --llm local --ids e01,m02,h01     # subset
     python -m eval.run_eval --llm local --out eval/runs/x     # resumes if x/results.jsonl exists
@@ -78,12 +79,15 @@ def score_case(case: dict, state: dict, db: Path, db_changed: bool) -> dict:
 
 
 def make_llm(kind: str):
+    if kind == "specialist":
+        from analyst.specialist import specialist_from_env
+        return specialist_from_env()
     return {"local": LocalAnalystLLM, "claude": ClaudeAnalystLLM, "mock": MockAnalystLLM}[kind]()
 
 
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--llm", choices=["local", "claude", "mock"], default=os.environ.get("ANALYST_LLM", "local"))
+    ap.add_argument("--llm", choices=["local", "specialist", "claude", "mock"], default=os.environ.get("ANALYST_LLM", "local"))
     ap.add_argument("--ids", help="comma-separated case ids")
     ap.add_argument("--category", help="comma-separated categories")
     ap.add_argument("--limit", type=int)

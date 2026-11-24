@@ -2,8 +2,11 @@
 
 A **LangGraph** agent that takes a business question, calls a **SQL model as a tool**,
 runs the query through **MCP tools** after a **human-approval** step, **retries on SQL
-errors**, renders a **chart**, and writes a **summary**. It uses **Claude**
-(`claude-opus-5-5`) through the official Anthropic SDK.
+errors**, renders a **chart**, and writes a **summary**. The SQL can come from a
+**fine-tuned open text-to-SQL model** (Qwen2.5-Coder-3B + QLoRA, running on CPU via llama.cpp),
+from **Claude** (`claude-opus-5-5`), or from any OpenAI-compatible model server.
+
+**Live demo:** _add your Hugging Face Space link here_ · see [Web demo and hosting](#web-demo-and-hosting)
 
 ```
           ┌──────────────┐
@@ -108,6 +111,60 @@ The server works on its own, e.g. in Claude Desktop / Claude Code:
 }
 ```
 
+## Fine-tuned text-to-SQL model
+
+`analyst/specialist.py` (`ANALYST_LLM=specialist`) plugs a small fine-tuned text-to-SQL model
+in as the agent's SQL tool. A Spider/BIRD fine-tune is very good at `schema + question → SQL`,
+but it was never trained to refuse, choose charts or write prose, so the work is split:
+
+| Job | Model |
+|---|---|
+| Write the SQL, in the Spider/BIRD prompt format it was trained on; business definitions (what "revenue" means) go in as BIRD-style *evidence* | **fine-tuned specialist** (`ANALYST_SQL_MODEL`, optional `ANALYST_SQL_LORA`) |
+| **Execution-guided self-correction**: a failed query, the database error and a schema-based fix hint (e.g. "`region` lives in `customers`") go back to the specialist; a query that repeats a failed one is resampled | specialist, driven by the LangGraph retry loop |
+| Read-only/answerable gate, chart plan, summary | small generalist (`ANALYST_GENERAL_MODEL`, default Qwen2.5-Coder-3B-Instruct Q4_K_M) |
+
+Both models run in-process through llama.cpp, so no server and no API key are needed. If
+your training prompt differs from the default, point `ANALYST_SQL_PROMPT` at a template file
+with `{schema}`, `{question}` and `{evidence}` placeholders, and set `ANALYST_SQL_SCHEMA=ddl`
+if you trained on CREATE TABLE statements only.
+
+To export a QLoRA adapter to the quantized GGUF this needs (merge → convert → Q4_K_M → upload
+to the Hugging Face Hub), run `deploy/export_gguf.py`; its docstring has the exact commands.
+
+```bash
+ANALYST_SQL_MODEL=hf://<hf-user>/<your-model>-GGUF/model-q4_k_m.gguf python -m eval.run_eval --llm specialist
+```
+
+## Web demo and hosting
+
+`app.py` is a Gradio web app: ask a question, review/edit/reject the SQL, then see the
+chart, summary, result table and a trace of what the agent did (including self-corrections).
+Example buttons show answers pre-computed by the same agent (`python app.py --build-cache`),
+so visitors get something instantly on a free CPU host.
+
+```bash
+pip install -r requirements.txt -r requirements-app.txt
+python app.py                      # http://127.0.0.1:7860 (downloads the 3B model on first run)
+ANALYST_LLM=mock python app.py     # UI only, no model
+```
+
+**Hosting: Hugging Face Spaces (free).** The repo has a `Dockerfile` that builds llama.cpp,
+seeds the demo database and downloads the models at build time. Free CPU Spaces have
+2 vCPU and 16 GB RAM, which fits two 3B Q4 models (~4 GB), and the URL is public and permanent.
+The Space sleeps after 48 hours without visitors and wakes on the next visit (about a minute).
+
+```bash
+pip install huggingface_hub && huggingface-cli login        # a write token
+python deploy/hf_space.py --space <hf-user>/ai-data-analyst \
+    --sql-model hf://<hf-user>/<your-model>-GGUF/model-q4_k_m.gguf \
+    --repo-url https://github.com/<github-user>/agent_analyst
+```
+
+The same image runs anywhere Docker does (Render, Fly.io, Google Cloud Run):
+`docker build -t analyst . && docker run -p 7860:7860 analyst`. The public demo is safe to
+expose: the database is opened read-only, every query passes the SQL guard, and no API keys
+are involved.
+
 ## Configuration
 
 | Env var | Default | Purpose |
@@ -116,6 +173,10 @@ The server works on its own, e.g. in Claude Desktop / Claude Code:
 | `ANALYST_MODEL` | `claude-opus-5-5` | Model for the SQL model, chart planner and summary |
 | `ANALYST_DB` | `demo/shop.db` | SQLite database the MCP server opens (read-only) |
 | `ANALYST_MAX_ROWS` | `500` | Row cap returned by `run_query` |
+| `ANALYST_LLM` | auto | `claude`, `local`, `specialist` or `mock` |
+| `ANALYST_SQL_MODEL` / `ANALYST_SQL_LORA` | – | Fine-tuned SQL model GGUF (path or `hf://repo/file`) and optional LoRA |
+| `ANALYST_GENERAL_MODEL` | Qwen2.5-Coder-3B-Instruct Q4_K_M | Gate, chart and summary model for `specialist` |
+| `ANALYST_SQL_PROMPT` / `ANALYST_SQL_SCHEMA` | Spider/BIRD-style / `ddl+rows` | Match the specialist's training prompt |
 
 Claude calls use structured outputs (Pydantic), an explicit `effort` setting, SDK retries
 for transient API errors, and server-side refusal fallback (`fallbacks: "default"`).
@@ -149,12 +210,24 @@ python -m eval.run_eval --llm local --ids e01,h01     # subset; --category hard;
 python -m eval.report eval/runs/<run>                 # rebuild a scorecard
 ```
 
+**Results with an open model (Qwen2.5-Coder-7B-Instruct Q4_K_M, CPU, no fine-tuning)**,
+full scorecards in `eval/runs/`:
+
+| Metric | Value |
+|---|---|
+| Answer accuracy (34 questions with a reference) | 73.5% (easy 91.7%, medium 75.0%, hard 50.0%) |
+| Query ran successfully | 97.5% |
+| SQL errors recovered by self-correction | 4 of 5 (0 of 5 before schema-based fix hints) |
+| Safety: database unchanged under 6 write/injection attempts | 100% |
+| Unanswerable questions declined | 83.3% |
+| Latency per question p50 / p95 | 90 s / 197 s on 4 CPU cores |
+
 Each run writes `results.jsonl` (one line per question: SQL, attempts, result, summary and scores),
 `scorecard.md` / `scorecard.json`, and the charts. Re-running with the same `--out`
 resumes where it stopped. `tests/test_eval.py` checks the harness itself: a model that
 returns the reference SQL must score 100%.
 
-The agent can run on any backend: set `ANALYST_LLM=claude|local|mock` (`local` = any
+The agent can run on any backend: set `ANALYST_LLM=claude|local|specialist|mock` (`local` = any
 OpenAI-compatible server, configured with `ANALYST_LOCAL_URL` / `ANALYST_LOCAL_MODEL`).
 
 ## Project layout
@@ -164,11 +237,17 @@ analyst/
   graph.py        LangGraph workflow (nodes, retry routing, interrupt)
   agent.py        DataAnalyst: owns MCP connection, graph, checkpointer
   llm.py          Claude SQL model / chart planner / summarizer + offline mock
+  specialist.py   fine-tuned text-to-SQL model + generalist, in-process llama.cpp
   mcp_server.py   MCP server: list_tables, describe_schema, run_query, render_chart
   mcp_client.py   MCP stdio client
   sql_safety.py   read-only SQL guard
   charts.py       matplotlib rendering
+app.py            Gradio web demo (Hugging Face Spaces / Docker)
+deploy/
+  hf_space.py     publish the demo to a Hugging Face Space
+  export_gguf.py  QLoRA adapter -> merged -> GGUF Q4_K_M -> Hugging Face Hub
 demo/
+  cache/          pre-computed answers for the web demo's example buttons
   seed_db.py      deterministic sample e-commerce database
   run_demo.py     interactive CLI demo + Markdown report
 eval/

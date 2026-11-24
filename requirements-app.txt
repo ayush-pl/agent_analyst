@@ -1,0 +1,5 @@
+# Web demo + in-process open models (on top of requirements.txt)
+gradio>=5,<7
+huggingface_hub>=0.24
+pandas>=2
+llama-cpp-python>=0.3.2
