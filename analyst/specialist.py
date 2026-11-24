@@ -49,16 +49,22 @@ from analyst.llm import (
 
 DEFAULT_GENERAL_MODEL = "hf://Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-3b-instruct-q4_k_m.gguf"
 
-# Domain knowledge given to the SQL model as BIRD-style "evidence".
-DEFAULT_EVIDENCE = (
-    "revenue refers to SUM(order_items.quantity * order_items.unit_price * (1 - order_items.discount)) "
-    "over orders with status = 'completed' unless the question says otherwise; "
-    "region and segment are columns of customers; category is a column of products; "
-    "dates are ISO text, use strftime('%Y-%m', order_date) for months; "
+# Generic SQLite knowledge given to the SQL model as BIRD-style "evidence". Dataset-specific
+# definitions come from the "-- note:" lines of the schema (the dataset's notes file).
+GENERIC_EVIDENCE = (
+    "dates are ISO text, use strftime('%Y-%m', col) for months; "
     "prefix every column with its table alias when joining; "
-    "SQLite integer division truncates, so compute rates and percentages as 100.0 * part / total; "
-    "return rate means the share of orders with status = 'returned'."
+    "SQLite integer division truncates, so compute rates and percentages as 100.0 * part / total."
 )
+DEFAULT_EVIDENCE = GENERIC_EVIDENCE  # backwards-compatible name
+
+
+def split_notes(schema: str) -> tuple[str, str]:
+    """Separate "-- note:" lines (dataset notes) from the rest of the schema text."""
+    notes = [ln[len("-- note:"):].strip() for ln in schema.splitlines() if ln.startswith("-- note:")]
+    rest = "\n".join(ln for ln in schema.splitlines() if not ln.startswith("-- note:"))
+    return " ".join(notes), rest
+
 
 # Spider/BIRD-style prompt. Replace with your exact training template via ANALYST_SQL_PROMPT.
 DEFAULT_SQL_PROMPT = """Database schema (SQLite):
@@ -189,7 +195,7 @@ class FineTunedSQLAnalystLLM:
     """
 
     def __init__(self, sql_chat: Any, general: Any, prompt_template: str | None = None,
-                 evidence: str = DEFAULT_EVIDENCE, schema_style: str | None = None):
+                 evidence: str = GENERIC_EVIDENCE, schema_style: str | None = None):
         self.sql_chat = sql_chat
         self.general = general
         tpl = prompt_template or os.environ.get("ANALYST_SQL_PROMPT")
@@ -217,8 +223,10 @@ class FineTunedSQLAnalystLLM:
         return extract_sql(text)
 
     def sql_prompt(self, question: str, schema: str, attempts: Sequence[dict]) -> str:
-        sch = ddl_only(schema) if self.schema_style == "ddl" else schema
-        prompt = self.template.format(schema=sch, question=question, evidence=self.evidence)
+        notes, schema_only = split_notes(schema)
+        sch = ddl_only(schema_only) if self.schema_style == "ddl" else schema_only
+        evidence = f"{notes} {self.evidence}".strip()
+        prompt = self.template.format(schema=sch, question=question, evidence=evidence)
         if attempts:
             # Execution-guided self-correction: show the failed queries and what went wrong.
             fb = []
@@ -250,7 +258,7 @@ class FineTunedSQLAnalystLLM:
         phrases them. A summary with any number not traceable to the result, or with a
         placeholder, is replaced by the exact fact summary."""
         facts = fact_summary(question, columns, rows, chart)
-        if not rows or len(columns) == 1 and len(rows) == 1:
+        if not rows or len(columns) == 1 and len(rows) == 1 or all(v is None for r in rows for v in r):
             return facts
         user = (f"Question: {question}\n\nVerified facts:\n{facts}\n\n"
                 f"Result ({len(rows)} rows{', truncated' if truncated else ''}; first row is the header):\n"

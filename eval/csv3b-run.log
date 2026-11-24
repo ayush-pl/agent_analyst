@@ -1,0 +1,13 @@
+[1/11] c01 ✓ done retries=0 45s
+[2/11] c02 ✓ done retries=0 36s
+[3/11] c03 ✓ done retries=0 46s
+[4/11] c04 ✓ done retries=0 54s
+[5/11] c05 ✓ done retries=0 47s
+[6/11] c06 ✓ done retries=0 27s
+[7/11] c07 ✗ done retries=0 41s
+[8/11] c08 ✗ done retries=0 46s
+[9/11] c09 ✓ done retries=0 55s
+[10/11] c10 ✓ unanswerable retries=0 9s
+[11/11] c11 ✓ unanswerable retries=0 6s
+
+Scorecard: eval/runs/csv-qwen2.5-coder-3b-base/scorecard.md

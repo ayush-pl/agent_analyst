@@ -100,8 +100,8 @@ Rules:
   multi-series questions return long format (x, series, value).
 - Order results meaningfully (time ascending, rankings descending) and LIMIT rankings to a
   reasonable top N (default 10) unless the question asks otherwise.
-- Revenue = quantity * unit_price * (1 - discount) on order_items, counting only
-  completed orders unless the question says otherwise.
+- Follow the "-- note:" lines in the schema: they are the dataset's business definitions
+  (e.g. how revenue is calculated) and override your own assumptions.
 - If previous attempts failed, read the database error carefully and fix the cause.
 - If the schema does not contain the data needed (e.g. marketing spend, NPS, employees), or the
   request asks to insert/update/delete/create/drop anything, set answerable=false, leave sql
@@ -314,14 +314,15 @@ WHERE o.status = 'completed' GROUP BY quarter, o.channel ORDER BY quarter, o.cha
 
 def _additive(measure: str) -> bool:
     """Totals and shares only make sense for additive measures (revenue, counts), not rates."""
-    return not re.search(r"rate|pct|percent|avg|average|mean|ratio|share|margin|growth|price", measure, re.I)
+    return not re.search(r"rate|pct|percent|avg|average|mean|ratio|share|margin|growth|price|discount|score|age", measure, re.I)
 
 
 def fact_summary(question: str, columns: Sequence[str], rows: Sequence[Sequence[Any]],
                  chart: ChartSpec | None = None) -> str:
     """Deterministic summary computed from the result: every number is exact."""
-    if not rows:
-        return "The query returned no rows."
+    if not rows or all(v is None for r in rows for v in r):
+        return ("The query returned no data, so the database probably does not contain the "
+                "information this question needs. Check the SQL in \"What the agent did\".")
     spec = chart or heuristic_chart(question, columns, rows)
     cols = list(columns)
     if spec.chart_type == "none" or not spec.x or not spec.y or len(rows) == 1:

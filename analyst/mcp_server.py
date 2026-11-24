@@ -59,7 +59,7 @@ def list_tables() -> dict[str, Any]:
 
 @mcp.tool()
 def describe_schema() -> dict[str, Any]:
-    """Return the CREATE TABLE statement and three sample rows for every table."""
+    """Return the CREATE TABLE statement and three sample rows for every table, plus dataset notes."""
     try:
         with _connect() as con:
             out = []
@@ -68,7 +68,9 @@ def describe_schema() -> dict[str, Any]:
                 cur = con.execute(f'SELECT * FROM "{name}" LIMIT 3')
                 cols = [d[0] for d in cur.description]
                 out.append({"table": name, "ddl": ddl.strip(), "columns": cols, "sample_rows": cur.fetchall()})
-            return {"ok": True, "dialect": "sqlite", "tables": out}
+            notes_file = Path(DB_PATH).with_suffix(".notes.md")
+            notes = notes_file.read_text().strip() if notes_file.exists() else ""
+            return {"ok": True, "dialect": "sqlite", "tables": out, "notes": notes}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)}
 

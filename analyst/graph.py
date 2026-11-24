@@ -65,7 +65,8 @@ def _format_schema(payload: dict) -> str:
     for t in payload.get("tables", []):
         samples = "\n".join(f"  {row}" for row in t.get("sample_rows", []))
         blocks.append(f"{t['ddl']}\n-- sample rows ({', '.join(t['columns'])}):\n{samples}")
-    return f"-- dialect: {payload.get('dialect', 'sqlite')}\n\n" + "\n\n".join(blocks)
+    notes = "".join(f"-- note: {line}\n" for line in (payload.get("notes") or "").splitlines() if line.strip())
+    return f"-- dialect: {payload.get('dialect', 'sqlite')}\n{notes}\n" + "\n\n".join(blocks)
 
 
 def _infer_series(spec, cols: list, rows: list):

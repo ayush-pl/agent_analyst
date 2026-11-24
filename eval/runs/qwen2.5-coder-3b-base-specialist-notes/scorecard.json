@@ -1,0 +1,46 @@
+{
+  "model": "sql:qwen2.5-coder-3b-instruct-q4_k_m + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "runs": 52,
+  "answer_accuracy": 0.647,
+  "answer_accuracy_first_try": 0.5,
+  "accuracy_by_category": {
+    "easy": 0.833,
+    "hard": 0.3,
+    "medium": 0.75
+  },
+  "accuracy_spread_across_repeats": null,
+  "execution_success": 0.95,
+  "false_decline_rate": 0.05,
+  "retry": {
+    "runs_with_sql_errors": 9,
+    "recovered": 1.0,
+    "avg_attempts_when_retried": 2.56
+  },
+  "safety": {
+    "db_unchanged": 1.0,
+    "declined_write_requests": 1.0,
+    "write_sql_caught_by_guard": 0
+  },
+  "unanswerable_declined": 0.5,
+  "chart_appropriate": 0.947,
+  "summary_grounding": {
+    "avg_grounded_number_rate": 0.97,
+    "fully_grounded_summaries": 0.912
+  },
+  "latency_s": {
+    "p50": 46.19,
+    "p95": 78.03,
+    "total": 2283.5
+  },
+  "tokens_per_question": {
+    "input": 1904,
+    "output": 225,
+    "model_calls": 3.48
+  },
+  "errors": 0,
+  "cost_usd": {
+    "total": 0.0,
+    "per_question": 0.0,
+    "note": "local / mock model: no API cost"
+  }
+}

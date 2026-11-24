@@ -76,6 +76,12 @@ CREATE TABLE order_items (
 """
 
 
+NOTES = """revenue refers to SUM(order_items.quantity * order_items.unit_price * (1 - order_items.discount)) over orders with status = 'completed', unless the question says otherwise.
+region and segment are columns of customers; category is a column of products.
+return rate means the share of orders with status = 'returned'.
+"""
+
+
 def seed(path: Path = DEFAULT_PATH, seed_value: int = 7) -> Path:
     rng = random.Random(seed_value)
     path = Path(path)
@@ -128,6 +134,7 @@ def seed(path: Path = DEFAULT_PATH, seed_value: int = 7) -> Path:
     con.executemany("INSERT INTO order_items VALUES (?, ?, ?, ?, ?, ?)", items)
     con.commit()
     con.close()
+    path.with_suffix(".notes.md").write_text(NOTES)   # business definitions the SQL model sees
     return path
 
 

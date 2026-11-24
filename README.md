@@ -111,6 +111,40 @@ The server works on its own, e.g. in Claude Desktop / Claude Code:
 }
 ```
 
+## Analyze your own CSV
+
+Upload a CSV in the web demo's **Analyze your CSV** tab, or from code:
+
+```python
+from analyst.datasets import import_csv, profile, suggest_questions
+info = import_csv("sales.csv", "uploads/sales.db", user_notes="revenue = qty * unit_price")
+print(profile(info.db_path, info.table))            # overview computed from the data
+async with DataAnalyst(db_path=info.db_path) as analyst:
+    run = await analyst.ask("What is total revenue by store?")
+```
+
+What happens to the file:
+
+1. **Cleaning** (`analyst/datasets.py`). The import detects the delimiter (`,` `;` tab `|`) and
+   the encoding, and turns headers into SQL-safe names (`"Unit Price ($)"` becomes `unit_price`).
+   Values like `$1,234.50`, `(300)` and `12%` become numbers, with percentages stored as decimals
+   so `discount / 100` can't silently become 0. Dates in common formats become ISO text, so
+   `strftime` works.
+2. **Dataset notes.** A `<db>.notes.md` file records where the table came from, which columns hold
+   dates or percentages, the original headers, and any definitions the user typed. The MCP
+   `describe_schema` tool returns these notes with the schema, so every SQL model sees them
+   (the fine-tuned model gets them as BIRD-style evidence). The demo shop uses the same mechanism
+   for its revenue definition (`demo/shop.notes.md`).
+3. **Overview.** `profile()` lists each column's role, missing values and range, plus headline
+   facts, all computed by SQL, so the "summary of my file" contains no generated numbers.
+   `suggest_questions()` proposes questions that fit the columns.
+4. **Questions** go through the same agent: SQL review, read-only execution, self-correction,
+   chart, and a checked summary.
+
+`python -m eval.run_csv_eval --llm specialist` scores the agent on
+`demo/sample_coffee_sales.csv`, a deliberately messy file in a different domain, with 9
+reference queries plus a question to decline and a request to block.
+
 ## Fine-tuned text-to-SQL model
 
 `analyst/specialist.py` (`ANALYST_LLM=specialist`) plugs a small fine-tuned text-to-SQL model
@@ -137,7 +171,8 @@ ANALYST_SQL_MODEL=hf://<hf-user>/<your-model>-GGUF/model-q4_k_m.gguf python -m e
 
 ## Web demo and hosting
 
-`app.py` is a Gradio web app: ask a question, review/edit/reject the SQL, then see the
+`app.py` is a Gradio web app with two tabs: the demo shop and **Analyze your CSV**. Ask a
+question, review/edit/reject the SQL, then see the
 chart, summary, result table and a trace of what the agent did (including self-corrections).
 Example buttons show answers pre-computed by the same agent (`python app.py --build-cache`),
 so visitors get something instantly on a free CPU host.
@@ -214,14 +249,23 @@ python -m eval.report eval/runs/<run>                 # rebuild a scorecard
 
 | Metric | Qwen2.5-Coder-7B (`local`) | Qwen2.5-Coder-3B, not fine-tuned (`specialist`) |
 |---|---|---|
-| Answer accuracy (34 questions with a reference) | 73.5% | 52.9% |
-| &nbsp;&nbsp;easy / medium / hard | 91.7 / 75.0 / 50.0% | 66.7 / 58.3 / 30.0% |
-| Query ran successfully | 97.5% | 92.5% |
+| Answer accuracy (34 questions with a reference) | 73.5% | 64.7% |
+| &nbsp;&nbsp;easy / medium / hard | 91.7 / 75.0 / 50.0% | 83.3 / 75.0 / 30.0% |
+| Query ran successfully | 97.5% | 95.0% |
 | SQL errors recovered by self-correction | 4 of 5 | 9 of 9 |
 | Safety: database unchanged under 6 write/injection attempts | 100% | 100% |
 | Unanswerable questions declined | 83.3% | 50.0% |
-| Summary numbers traceable to the data | 79.6% | 96.8% (checked summaries + exact fallback) |
-| Latency per question p50 / p95 (4 CPU cores) | 90 s / 197 s | 48 s / 80 s |
+| Summary numbers traceable to the data | 79.6% | 97.0% (checked summaries + exact fallback) |
+| Latency per question p50 / p95 (4 CPU cores) | 90 s / 197 s | 46 s / 78 s |
+
+**Uploaded CSV** (`eval/run_csv_eval.py`, a file the model never saw, Qwen2.5-Coder-3B
+`specialist`): 7 of 9 answers match the reference, the unanswerable question is declined, the
+delete request is blocked, and 100% of summary numbers trace to the data.
+
+The 3B numbers use the dataset-notes prompt layout (`eval/runs/qwen2.5-coder-3b-base-specialist-notes`);
+an earlier run with the shop rules hard-coded in the prompt scored 52.9%
+(`eval/runs/qwen2.5-coder-3b-base-specialist`). Each run is a single deterministic pass over
+34 scored questions, so differences of a few points are within noise.
 
 The 3B column is the baseline for a fine-tuned 3B SQL model: run
 `ANALYST_SQL_MODEL=... python -m eval.run_eval --llm specialist` with your weights to get
@@ -243,6 +287,8 @@ analyst/
   agent.py        DataAnalyst: owns MCP connection, graph, checkpointer
   llm.py          Claude SQL model / chart planner / summarizer + offline mock
   specialist.py   fine-tuned text-to-SQL model + generalist, in-process llama.cpp
+  datasets.py     CSV upload: cleaning, dataset notes, overview, suggested questions
+  grounding.py    checks that summary numbers come from the query result
   mcp_server.py   MCP server: list_tables, describe_schema, run_query, render_chart
   mcp_client.py   MCP stdio client
   sql_safety.py   read-only SQL guard
@@ -253,6 +299,8 @@ deploy/
   export_gguf.py  QLoRA adapter -> merged -> GGUF Q4_K_M -> Hugging Face Hub
 demo/
   cache/          pre-computed answers for the web demo's example buttons
+  shop.notes.md   business definitions for the demo shop (seen by every SQL model)
+  sample_coffee_sales.csv   messy sample CSV for the upload tab and the CSV evaluation
   seed_db.py      deterministic sample e-commerce database
   run_demo.py     interactive CLI demo + Markdown report
 eval/

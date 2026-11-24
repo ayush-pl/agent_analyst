@@ -8,3 +8,4 @@ demo/*.db
 *.egg-info/
 eval/runs/pilot-*
 models/
+eval/runs/*/*.db

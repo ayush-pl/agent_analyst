@@ -4,10 +4,15 @@
     ANALYST_LLM=mock python app.py      # instant UI check, no model download
     python app.py --build-cache         # re-run the example questions, save to demo/cache/
 
-The model backend comes from ``ANALYST_LLM`` (default here: ``specialist``, the
-fine-tuned text-to-SQL model + a small generalist, both in-process via llama.cpp;
-see analyst/specialist.py). Example questions show pre-computed answers instantly
-so visitors are not kept waiting on a free CPU; "Ask" always runs the agent live.
+Two tabs:
+
+* **Demo shop**: a seeded e-commerce database with instant, pre-computed example answers.
+* **Your CSV**: upload a CSV; it is cleaned into a SQLite table (analyst/datasets.py), you get
+  an overview computed from the data plus suggested questions, then ask anything about it.
+
+Both tabs run the same LangGraph agent (SQL review, self-correction, chart, checked summary).
+The model backend comes from ``ANALYST_LLM`` (default here: ``specialist``, the fine-tuned
+text-to-SQL model + a small generalist, both in-process via llama.cpp).
 """
 
 from __future__ import annotations
@@ -19,14 +24,21 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 os.environ.setdefault("ANALYST_LLM", "specialist")
 DB_PATH = Path(os.environ.get("ANALYST_DB", ROOT / "demo" / "shop.db"))
 CACHE_DIR = ROOT / "demo" / "cache"
+SAMPLE_CSV = ROOT / "demo" / "sample_coffee_sales.csv"
+SAMPLE_NOTES = "revenue = qty * unit_price * (1 - discount / 100). discount is a percentage."
 OUT_DIR = Path(tempfile.gettempdir()) / "analyst-demo"
+UPLOAD_DIR = OUT_DIR / "uploads"
+UPLOAD_TTL_S = 6 * 3600
+MAX_AGENTS = 3          # live datasets kept open (each holds an MCP server subprocess)
 REPO_URL = os.environ.get("ANALYST_REPO_URL", "")
 
 # Taken from the evaluation set (eval/dataset.py) and verified correct with the default model,
@@ -37,11 +49,12 @@ EXAMPLES = [
     "What is the monthly revenue for each sales channel in 2026?",
     "What is the gross profit (revenue minus unit cost times quantity) by product category for completed orders?",
     "What are the top 5 products by revenue?",
-    "What is our Net Promoter Score?",
+    "How much did we spend on marketing last quarter?",
     "Delete all cancelled orders.",
 ]
 
-_analyst = None
+_llm = None
+_agents: "OrderedDict[str, object]" = OrderedDict()
 _lock: asyncio.Lock | None = None
 
 
@@ -52,26 +65,41 @@ def ensure_db() -> None:
         seed(DB_PATH)
 
 
-def schema_markdown() -> str:
-    con = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+def schema_markdown(db: Path = DB_PATH) -> str:
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     lines = []
     for (t,) in con.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"):
-        cols = ", ".join(r[1] for r in con.execute(f"PRAGMA table_info({t})"))
-        n = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+        cols = ", ".join(r[1] for r in con.execute(f'PRAGMA table_info("{t}")'))
+        n = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
         lines.append(f"- **{t}** ({n:,} rows): {cols}")
     con.close()
     return "\n".join(lines)
 
 
-async def get_analyst():
-    """One shared agent (MCP server subprocess + models), created inside Gradio's event loop."""
-    global _analyst, _lock
-    if _analyst is None:
-        from analyst.agent import DataAnalyst
+async def get_analyst(db: str):
+    """One agent per dataset (each owns an MCP server subprocess); the models are shared.
+
+    Created inside Gradio's event loop; the least recently used agent is closed when more
+    than MAX_AGENTS datasets are open.
+    """
+    global _llm, _lock
+    from analyst.agent import DataAnalyst
+    from analyst.llm import default_llm
+
+    if _lock is None:
         _lock = asyncio.Lock()
-        _analyst = DataAnalyst(db_path=str(DB_PATH), require_approval=True, output_dir=str(OUT_DIR))
-        await _analyst.__aenter__()
-    return _analyst
+    if _llm is None:
+        _llm = default_llm()
+    if db in _agents:
+        _agents.move_to_end(db)
+        return _agents[db]
+    agent = DataAnalyst(db_path=db, llm=_llm, require_approval=True, output_dir=str(OUT_DIR / uuid.uuid4().hex[:8]))
+    await agent.__aenter__()
+    _agents[db] = agent
+    while len(_agents) > MAX_AGENTS:   # close the least recently used upload; keep the shop warm
+        victim = next(k for k in _agents if k not in (str(DB_PATH), db))
+        await _agents.pop(victim).__aexit__(None, None, None)
+    return agent
 
 
 # ---------------------------------------------------------------- rendering
@@ -95,8 +123,7 @@ def render(state: dict, note: str = ""):
         badge += f" · self-corrected after {len(attempts)} failed quer{'y' if len(attempts) == 1 else 'ies'}"
     trace = "\n".join(f"{i + 1}. {e}" for i, e in enumerate(state.get("events") or []))
     if attempts:
-        trace += "\n\n**Failed attempts**\n" + "\n".join(
-            f"- `{a['error']}`" for a in attempts)
+        trace += "\n\n**Failed attempts**\n" + "\n".join(f"- `{a['error']}`" for a in attempts)
     chart = state.get("chart_path")
     has_rows = table is not None and len(table) > 0
     return (f"{badge}{'  ·  ' + note if note else ''}", summary,
@@ -117,8 +144,6 @@ def cached(question: str):
     return None
 
 
-# ---------------------------------------------------------------- handlers
-
 class _Empty:
     """Hidden chart + hidden table + no SQL + no trace (lazy so gradio imports stay inside handlers)."""
 
@@ -130,13 +155,17 @@ class _Empty:
 _EMPTY = _Empty()
 
 
-async def ask(question: str, require_approval: bool):
+# ---------------------------------------------------------------- agent handlers
+
+async def ask(question: str, require_approval: bool, db: str | None):
     import gradio as gr
 
     question = (question or "").strip()
+    if not db:
+        raise gr.Error("Load a CSV file first.")
     if not question:
         raise gr.Error("Type a question first.")
-    analyst = await get_analyst()
+    analyst = await get_analyst(db)
     async with _lock:
         analyst.require_approval = require_approval
         run = await analyst.ask(question[:500])
@@ -149,13 +178,13 @@ async def ask(question: str, require_approval: bool):
     return (None, "", gr.update(visible=False), *s[:1], "", *s[1:])
 
 
-async def decide(thread_id: str | None, sql: str, action: str, proposed: str | None = None):
+async def decide(thread_id: str | None, sql: str, action: str, proposed: str | None, db: str | None):
     import gradio as gr
     from analyst.agent import AnalystRun
 
-    if not thread_id:
+    if not thread_id or not db:
         raise gr.Error("Nothing is waiting for approval. Ask a question first.")
-    analyst = await get_analyst()
+    analyst = await get_analyst(db)
     run = AnalystRun(thread_id, {}, {"pending": True})
     async with _lock:
         if action == "reject":
@@ -184,13 +213,102 @@ def show_example(question: str):
     return question, gr.update(visible=False), *s
 
 
+# ---------------------------------------------------------------- CSV handlers
+
+N_SUGGEST = 4
+
+
+def _cleanup_uploads() -> None:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    open_dbs = set(_agents)
+    for f in UPLOAD_DIR.iterdir():
+        db_twin = str(f.with_suffix(".db"))
+        if now - f.stat().st_mtime > UPLOAD_TTL_S and db_twin not in open_dbs:
+            f.unlink(missing_ok=True)
+
+
+def load_csv(file_path: str | None, notes: str, display_name: str | None = None):
+    """Upload -> cleaned SQLite table + overview + suggested questions."""
+    import gradio as gr
+
+    from analyst.datasets import import_csv, profile, suggest_questions
+
+    if not file_path:
+        raise gr.Error("Choose a CSV file first.")
+    _cleanup_uploads()
+    db = UPLOAD_DIR / f"{uuid.uuid4().hex}.db"
+    try:
+        info = import_csv(file_path, db, user_notes=notes or "", display_name=display_name or Path(file_path).name)
+    except Exception as e:  # noqa: BLE001 - show parsing problems to the user
+        raise gr.Error(f"Could not read that file as CSV: {e}") from e
+    overview = profile(info.db_path, info.table)
+    if info.renamed:
+        overview += "\n\n_Column names were cleaned for SQL: " + ", ".join(
+            f"`{o}` → `{n}`" for o, n in list(info.renamed.items())[:10]) + "._"
+    qs = suggest_questions(info.db_path, info.table, N_SUGGEST, notes or "")
+    btns = [gr.update(value=q, visible=True) for q in qs] + [gr.update(visible=False)] * (N_SUGGEST - len(qs))
+    status = (f"Loaded **{info.table}**: {info.rows:,} rows, {len(info.columns)} columns. "
+              "Ask a question below or pick a suggestion.")
+    return (info.db_path, status, gr.update(value=overview, visible=True), *btns)
+
+
+def load_sample():
+    return (str(SAMPLE_CSV), SAMPLE_NOTES, *load_csv(str(SAMPLE_CSV), SAMPLE_NOTES, SAMPLE_CSV.name))
+
+
 # ---------------------------------------------------------------- UI
 
 CSS = """
 .gradio-container {max-width: 1180px !important; margin: auto}
-#status {font-weight: 600}
+.status-line {font-weight: 600}
 footer {display: none !important}
 """
+
+
+def results_column(gr):
+    """Status, SQL approval box and results; returns the components in handler output order."""
+    status = gr.Markdown(elem_classes="status-line")
+    with gr.Group(visible=False) as approve_box:
+        sql_edit = gr.Code(label="Proposed SQL (you can edit it)", language="sql", interactive=True)
+        rationale = gr.Markdown()
+        with gr.Row():
+            run_btn = gr.Button("Approve & run", variant="primary")
+            rej_btn = gr.Button("Reject", variant="stop")
+    summary = gr.Markdown()
+    chart = gr.Image(label="Chart", type="filepath", show_label=False, visible=False)
+    table = gr.Dataframe(label="Result", wrap=True, max_height=320, visible=False)
+    with gr.Accordion("What the agent did", open=False):
+        final_sql = gr.Code(label="SQL that ran", language="sql", interactive=False)
+        trace = gr.Markdown()
+    return dict(status=status, approve_box=approve_box, sql_edit=sql_edit, rationale=rationale,
+                run_btn=run_btn, rej_btn=rej_btn, summary=summary, chart=chart, table=table,
+                final_sql=final_sql, trace=trace)
+
+
+def wire(gr, q, approval, ask_btn, r, db_state):
+    """Connect ask / approve / reject for one tab."""
+    thread, proposed = gr.State(None), gr.State(None)
+    outs = [thread, r["sql_edit"], r["approve_box"], r["status"], r["rationale"], r["summary"],
+            r["chart"], r["table"], r["final_sql"], r["trace"], proposed]
+
+    async def _ask(question, req, db):
+        res = await ask(question, req, db)
+        return (*res, res[1] or None)
+
+    async def _approve(t, sql, prop, db):
+        res = await decide(t, sql, "approve", prop, db)
+        return (*res, res[1] or None)
+
+    async def _reject(t, sql, prop, db):
+        res = await decide(t, sql, "reject", prop, db)
+        return (*res, None)
+
+    ask_btn.click(_ask, [q, approval, db_state], outs)
+    q.submit(_ask, [q, approval, db_state], outs)
+    r["run_btn"].click(_approve, [thread, r["sql_edit"], proposed, db_state], outs)
+    r["rej_btn"].click(_reject, [thread, r["sql_edit"], proposed, db_state], outs)
+    return _ask, outs
 
 
 def build_ui():
@@ -205,56 +323,63 @@ def build_ui():
             "Ask a business question in plain English. A **LangGraph** agent writes SQL with a "
             "**fine-tuned text-to-SQL model**, waits for **your approval**, runs it through **MCP tools** "
             "on a read-only database, corrects its own failed queries, then charts and summarizes the result.  \n"
-            f"{model_line} · runs on a free 2-CPU server, so a live question takes 1–2 minutes (the examples are instant)."
-            + (f" · [Source code]({REPO_URL})" if REPO_URL else ""))
-        thread = gr.State(None)
-        proposed = gr.State(None)
-        with gr.Row():
-            with gr.Column(scale=2):
-                q = gr.Textbox(label="Question", placeholder="e.g. What is revenue by product category?", lines=2)
+            f"{model_line} · runs on a free 2-CPU server, so a live question takes 1–2 minutes "
+            "(the examples are instant)." + (f" · [Source code]({REPO_URL})" if REPO_URL else ""))
+
+        with gr.Tabs():
+            # ------------------------------------------------ demo shop
+            with gr.Tab("Demo shop"):
+                shop_db = gr.State(str(DB_PATH))
                 with gr.Row():
-                    approval = gr.Checkbox(value=True, label="Review SQL before it runs")
-                    ask_btn = gr.Button("Ask", variant="primary")
-                gr.Markdown("**Try an example** (instant, pre-computed):")
-                ex_btns = [gr.Button(e, size="sm") for e in EXAMPLES]
-                with gr.Accordion("Database: a demo e-commerce shop", open=False):
-                    gr.Markdown(schema_markdown())
-            with gr.Column(scale=3):
-                status = gr.Markdown(elem_id="status")
-                with gr.Group(visible=False) as approve_box:
-                    sql_edit = gr.Code(label="Proposed SQL (you can edit it)", language="sql", interactive=True)
-                    rationale = gr.Markdown()
-                    with gr.Row():
-                        run_btn = gr.Button("Approve & run", variant="primary")
-                        rej_btn = gr.Button("Reject", variant="stop")
-                summary = gr.Markdown()
-                chart = gr.Image(label="Chart", type="filepath", show_label=False, visible=False)
-                table = gr.Dataframe(label="Result", wrap=True, max_height=320, visible=False)
-                with gr.Accordion("What the agent did", open=False):
-                    final_sql = gr.Code(label="SQL that ran", language="sql", interactive=False)
-                    trace = gr.Markdown()
+                    with gr.Column(scale=2):
+                        q = gr.Textbox(label="Question", lines=2,
+                                       placeholder="e.g. What is revenue by product category?")
+                        with gr.Row():
+                            approval = gr.Checkbox(value=True, label="Review SQL before it runs")
+                            ask_btn = gr.Button("Ask", variant="primary")
+                        gr.Markdown("**Try an example** (instant, pre-computed):")
+                        ex_btns = [gr.Button(e, size="sm") for e in EXAMPLES]
+                        with gr.Accordion("Database: a demo e-commerce shop", open=False):
+                            gr.Markdown(schema_markdown())
+                    with gr.Column(scale=3):
+                        r = results_column(gr)
+                wire(gr, q, approval, ask_btn, r, shop_db)
+                for b, e in zip(ex_btns, EXAMPLES):
+                    b.click(lambda e=e: show_example(e), None,
+                            [q, r["approve_box"], r["status"], r["summary"], r["chart"], r["table"],
+                             r["final_sql"], r["trace"]])
 
-        outs = [thread, sql_edit, approve_box, status, rationale, summary, chart, table, final_sql, trace]
-
-        async def _ask(question, req):
-            r = await ask(question, req)
-            return (*r, r[1] or None)
-
-        async def _approve(t, sql, prop):
-            r = await decide(t, sql, "approve", prop)
-            return (*r, r[1] or None)
-
-        async def _reject(t, sql, prop):
-            r = await decide(t, sql, "reject", prop)
-            return (*r, None)
-
-        ask_btn.click(_ask, [q, approval], outs + [proposed])
-        q.submit(_ask, [q, approval], outs + [proposed])
-        run_btn.click(_approve, [thread, sql_edit, proposed], outs + [proposed])
-        rej_btn.click(_reject, [thread, sql_edit, proposed], outs + [proposed])
-        for b, e in zip(ex_btns, EXAMPLES):
-            b.click(lambda e=e: show_example(e), None,
-                    [q, approve_box, status, summary, chart, table, final_sql, trace])
+            # ------------------------------------------------ your CSV
+            with gr.Tab("Analyze your CSV"):
+                csv_db = gr.State(None)
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        upload = gr.File(label="CSV file (max 25 MB)", file_types=[".csv", ".tsv", ".txt"],
+                                         type="filepath")
+                        notes = gr.Textbox(label="Definitions the agent should know (optional)", lines=2,
+                                           placeholder="e.g. revenue = qty * unit_price; a churned customer has status 'closed'")
+                        with gr.Row():
+                            load_btn = gr.Button("Load file", variant="primary")
+                            sample_btn = gr.Button("Try a sample file")
+                        gr.Markdown("_Files are converted to a private, read-only SQLite table and deleted "
+                                    "after a few hours. Do not upload sensitive data to a public demo._")
+                        q2 = gr.Textbox(label="Question about your data", lines=2)
+                        with gr.Row():
+                            approval2 = gr.Checkbox(value=True, label="Review SQL before it runs")
+                            ask_btn2 = gr.Button("Ask", variant="primary")
+                        gr.Markdown("**Suggested questions**")
+                        sug = [gr.Button(visible=False, size="sm") for _ in range(N_SUGGEST)]
+                    with gr.Column(scale=3):
+                        load_status = gr.Markdown(elem_classes="status-line")
+                        with gr.Accordion("Data overview", open=True):
+                            overview = gr.Markdown(visible=False)
+                        r2 = results_column(gr)
+                ask2, outs2 = wire(gr, q2, approval2, ask_btn2, r2, csv_db)
+                load_outs = [csv_db, load_status, overview, *sug]
+                load_btn.click(load_csv, [upload, notes], load_outs)
+                sample_btn.click(load_sample, None, [upload, notes, *load_outs])
+                for b in sug:
+                    b.click(lambda text: text, b, q2).then(ask2, [q2, approval2, csv_db], outs2)
     return ui
 
 
@@ -293,4 +418,5 @@ if __name__ == "__main__":
         import gradio as gr
         build_ui().queue(default_concurrency_limit=1, max_size=20).launch(
             server_name=os.environ.get("HOST", "0.0.0.0"), server_port=args.port, css=CSS,
-            theme=gr.themes.Soft(primary_hue="blue"), allowed_paths=[str(CACHE_DIR), str(OUT_DIR)])
+            theme=gr.themes.Soft(primary_hue="blue"), max_file_size="25mb",
+            allowed_paths=[str(CACHE_DIR), str(OUT_DIR)])
