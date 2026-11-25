@@ -9,3 +9,4 @@ demo/*.db
 eval/runs/pilot-*
 models/
 eval/runs/*/*.db
+site/

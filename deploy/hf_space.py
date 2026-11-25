@@ -5,12 +5,14 @@
     python deploy/hf_space.py --space <hf-user>/ai-data-analyst \\
         --repo-url https://github.com/<github-user>/agent_analyst
 
-Two Space types:
+Three Space types:
 
-* ``--sdk gradio`` (default, free CPU tier): Hugging Face installs ``requirements.txt`` and runs
+* ``--sdk static`` (default; free for every account): the static demo site built by
+  deploy/build_static.py, replays of real recorded runs, a live-run video and the evaluation.
+* ``--sdk gradio`` (the live app; Hugging Face needs a PRO subscription for this on cpu-basic): Hugging Face installs ``requirements.txt`` and runs
   ``app.py``. llama.cpp comes as a prebuilt wheel (nothing is compiled), the demo database is
   seeded at startup and the models download in the background as soon as the app boots.
-* ``--sdk docker``: builds the Dockerfile at the repo root (use it where Docker Spaces are
+* ``--sdk docker`` (also PRO): builds the Dockerfile at the repo root (use it where Docker Spaces are
   available to you; the same image runs on any Docker host).
 
 ``--stage DIR`` writes exactly what would be uploaded to DIR instead, so you can test it.
@@ -29,6 +31,8 @@ GRADIO_VERSION = "6.32.0"          # the version the app is tested with
 LLAMA_CPP_VERSION = "0.3.38"       # has a prebuilt manylinux x86_64 CPU wheel
 
 FRONT_MATTER = {
+    "static": """sdk: static
+app_file: index.html""",
     "gradio": f"""sdk: gradio
 sdk_version: {GRADIO_VERSION}
 python_version: "3.11"
@@ -87,6 +91,22 @@ def stage(dest: Path, sdk: str, repo_url: str) -> Path:
     """Copy the files a Space needs into ``dest``."""
     if dest.exists():
         shutil.rmtree(dest)
+    if sdk == "static":
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from build_static import build
+
+        build(dest, repo_url or "https://github.com/ayush-pl/agent_analyst")
+        repo_line = f"\nSource code: {repo_url}\n" if repo_url else ""
+        readme = SPACE_README.format(front_matter=FRONT_MATTER["static"], repo_line=repo_line)
+        readme = readme.replace("Runs entirely on CPU with llama.cpp, so a live question takes 1–2 minutes. The example buttons\n"
+                                "show answers the same agent produced earlier. After a restart the models (about 4 GB) download\n"
+                                "first, which takes a few minutes.\n",
+                                "This Space is a static page: it replays real runs recorded from the agent and shows a video of\n"
+                                "a live run. The live app runs anywhere with about 4 GB of RAM; see the source code.\n")
+        (dest / "README.md").write_text(readme)
+        return dest
     shutil.copytree(ROOT, dest, ignore=shutil.ignore_patterns(*IGNORE))
     shutil.rmtree(dest / "eval", ignore_errors=True)
     shutil.copytree(ROOT / "eval", dest / "eval", ignore=shutil.ignore_patterns(*IGNORE, *IGNORE_EVAL))
@@ -105,7 +125,7 @@ def stage(dest: Path, sdk: str, repo_url: str) -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--space", help="<hf-user>/<space-name>")
-    ap.add_argument("--sdk", choices=["gradio", "docker"], default="gradio")
+    ap.add_argument("--sdk", choices=["static", "gradio", "docker"], default="static")
     ap.add_argument("--sql-model", default="hf://ay2r/sqlforge-3b/gguf/sqlforge-3b-Q4_K_M.gguf",
                     help="fine-tuned GGUF as hf://owner/repo/file (default: SQLForge-3B Q4_K_M)")
     ap.add_argument("--sql-lora", default="", help="optional GGUF LoRA adapter (hf://repo/file)")
@@ -124,7 +144,7 @@ def main() -> None:
 
     api = HfApi()
     api.create_repo(args.space, repo_type="space", space_sdk=args.sdk, private=args.private, exist_ok=True)
-    variables = {"ANALYST_SQL_MODEL": args.sql_model, "ANALYST_SQL_LORA": args.sql_lora,
+    variables = {} if args.sdk == "static" else {"ANALYST_SQL_MODEL": args.sql_model, "ANALYST_SQL_LORA": args.sql_lora,
                  "ANALYST_REPO_URL": args.repo_url, "ANALYST_LLM": "specialist"}
     for key, value in variables.items():
         if value:
@@ -132,7 +152,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         folder = stage(Path(tmp) / "space", args.sdk, args.repo_url)
         api.upload_folder(folder_path=str(folder), repo_id=args.space, repo_type="space",
-                          commit_message="Deploy AI Data Analyst demo", delete_patterns=["*.py", "**/*.py"])
+                          commit_message="Deploy AI Data Analyst demo",
+                          delete_patterns=["*.py", "**/*.py", "assets/*"] if args.sdk != "static" else ["assets/*"])
     print(f"Deployed. Build logs and app: https://huggingface.co/spaces/{args.space}")
 
 

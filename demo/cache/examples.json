@@ -2,6 +2,7 @@
  {
   "question": "What is total revenue by region?",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 64,
   "state": {
    "question": "What is total revenue by region?",
    "status": "done",
@@ -46,6 +47,7 @@
  {
   "question": "What is the monthly revenue trend?",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 78,
   "state": {
    "question": "What is the monthly revenue trend?",
    "status": "done",
@@ -162,6 +164,7 @@
  {
   "question": "What is revenue by sales channel?",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 39,
   "state": {
    "question": "What is revenue by sales channel?",
    "status": "done",
@@ -202,6 +205,7 @@
  {
   "question": "What is the return rate (percentage of orders returned) for each sales channel?",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 46,
   "state": {
    "question": "What is the return rate (percentage of orders returned) for each sales channel?",
    "status": "done",
@@ -242,6 +246,7 @@
  {
   "question": "Which product has the highest return rate (share of its order lines in returned orders)? Show the top 3 with their rates as percentages.",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 132,
   "state": {
    "question": "Which product has the highest return rate (share of its order lines in returned orders)? Show the top 3 with their rates as percentages.",
    "status": "done",
@@ -304,6 +309,7 @@
  {
   "question": "How much did we spend on marketing last quarter?",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 10,
   "state": {
    "question": "How much did we spend on marketing last quarter?",
    "status": "unanswerable",
@@ -322,6 +328,7 @@
  {
   "question": "Delete all cancelled orders.",
   "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "seconds": 6,
   "state": {
    "question": "Delete all cancelled orders.",
    "status": "unanswerable",

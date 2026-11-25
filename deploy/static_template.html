@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Data Analyst</title>
+<meta name="description" content="A LangGraph agent that turns business questions into SQL with a fine-tuned 3B text-to-SQL model, waits for human approval, self-corrects, charts and summarizes. Replays of real recorded runs.">
+<style>
+:root {
+  --bg: #f7f8fa; --surface: #ffffff; --surface-2: #f1f3f6; --border: #e2e6ec;
+  --text: #17202b; --muted: #5d6877; --accent: #2a63d4; --accent-soft: #e8effc;
+  --ok: #157a4c; --ok-soft: #e6f4ec; --warn: #9a5b00; --warn-soft: #fdf1dc;
+  --bad: #b3261e; --bad-soft: #fbe9e7; --code-bg: #f4f6f9;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1318; --surface: #171c23; --surface-2: #1d232b; --border: #2a323d;
+    --text: #e6eaf0; --muted: #9aa5b4; --accent: #7aa7ff; --accent-soft: #1c2a44;
+    --ok: #5fd39a; --ok-soft: #15291f; --warn: #f0b95b; --warn-soft: #2d2414;
+    --bad: #ff8a80; --bad-soft: #2e1a19; --code-bg: #12171d; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1318; --surface: #171c23; --surface-2: #1d232b; --border: #2a323d;
+  --text: #e6eaf0; --muted: #9aa5b4; --accent: #7aa7ff; --accent-soft: #1c2a44;
+  --ok: #5fd39a; --ok-soft: #15291f; --warn: #f0b95b; --warn-soft: #2d2414;
+  --bad: #ff8a80; --bad-soft: #2e1a19; --code-bg: #12171d; --shadow: none;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+a { color: var(--accent); }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+header.hero { padding: 40px 0 8px; }
+h1 { font-size: 34px; line-height: 1.15; margin: 0 0 10px; letter-spacing: -.01em; }
+.lede { font-size: 17px; color: var(--muted); max-width: 760px; margin: 0 0 16px; }
+.links { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); text-decoration: none;
+  font: inherit; font-weight: 600; cursor: pointer; box-shadow: var(--shadow); }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+:root[data-theme="dark"] .btn.primary { color: #0b1220; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.primary { color: #0b1220; } }
+.btn:disabled { opacity: .5; cursor: default; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chips li { font-size: 13px; padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--text); }
+.note { margin: 18px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--surface);
+  border: 1px solid var(--border); color: var(--muted); font-size: 14px; }
+section { padding: 28px 0 8px; }
+h2 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 16px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+video { width: 100%; height: auto; display: block; border-radius: 12px; border: 1px solid var(--border); background: #000; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; overflow-x: auto; }
+.tab { padding: 9px 14px; border: 0; background: none; color: var(--muted); font: inherit; font-weight: 600;
+  border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.replay { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 860px) { .replay { grid-template-columns: minmax(0, 1fr); } }
+.qlist { padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.qlist h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 6px 6px 2px; }
+.q { text-align: left; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font: inherit; cursor: pointer; }
+.q:hover { border-color: var(--accent); }
+.q[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.q small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.panel { padding: 16px; min-height: 320px; }
+.panel .empty { color: var(--muted); padding: 40px 8px; text-align: center; }
+.ask { font-size: 17px; font-weight: 600; margin: 0 0 12px; }
+.step { margin: 12px 0; }
+.label { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 6px; }
+pre.sql { margin: 0; padding: 12px 14px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+  overflow-x: auto; font-size: 13px; line-height: 1.5; white-space: pre; }
+.badge { display: inline-block; font-size: 13px; font-weight: 600; padding: 3px 10px; border-radius: 6px; }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.bad { background: var(--bad-soft); color: var(--bad); }
+.actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.attempt { border-left: 3px solid var(--warn); padding: 4px 0 4px 10px; margin: 8px 0; }
+.attempt .err { font-size: 13px; color: var(--warn); margin: 0 0 4px; }
+.summary p { margin: 6px 0; }
+.summary ul, .summary ol { margin: 6px 0; padding-left: 22px; }
+.chart img { width: 100%; height: auto; display: block; border-radius: 8px; border: 1px solid var(--border); background: #fcfcfb; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { background: var(--surface-2); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+details { margin-top: 12px; }
+summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 14px; }
+details ol { margin: 8px 0 0; padding-left: 22px; font-size: 13px; color: var(--muted); }
+.meta { font-size: 13px; color: var(--muted); margin-top: 10px; }
+.filebox { padding: 12px 14px; margin-bottom: 12px; font-size: 14px; }
+.filebox .row { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; }
+.md-table { margin: 8px 0; }
+.evals td.v { text-align: right; font-variant-numeric: tabular-nums; }
+.evals tr.hl td { font-weight: 600; }
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; counter-reset: s; }
+.flow div { padding: 12px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); font-size: 14px; }
+.flow div::before { counter-increment: s; content: counter(s); display: inline-grid; place-items: center; width: 22px; height: 22px;
+  border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 12px; margin-right: 6px; }
+.flow b { display: inline; }
+.flow p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+pre.cmd { margin: 8px 0 0; padding: 12px 14px; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; font-size: 13px; }
+footer { padding: 28px 0 40px; color: var(--muted); font-size: 13px; }
+.toprow { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.btn.small { padding: 5px 10px; font-size: 13px; font-weight: 500; flex: none; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div class="toprow"><h1>AI Data Analyst</h1>
+      <button class="btn small" id="theme" type="button" aria-label="Switch between light and dark mode">Dark mode</button></div>
+    <p class="lede">Ask a business question in plain English, or upload a CSV. A LangGraph agent writes SQL with
+      a fine-tuned 3B text-to-SQL model, waits for your approval, runs it read-only through MCP tools, corrects its
+      own failed queries, then charts and summarizes the result.</p>
+    <div class="links">
+      <a class="btn primary" href="__REPO_URL__">Source code</a>
+      <a class="btn" id="model-link" href="#">SQLForge-3B model</a>
+      <a class="btn" href="#run">Run it yourself</a>
+    </div>
+    <ul class="chips">
+      <li>LangGraph</li><li>MCP tools</li><li>Human approval of every query</li><li>Execution-guided self-correction</li>
+      <li>SQLForge-3B (QLoRA on Spider + BIRD)</li><li>llama.cpp on CPU</li><li>Read-only by design</li>
+    </ul>
+    <p class="note">This page replays <strong>real runs recorded from the agent</strong> (the same code as the repository,
+      with SQLForge-3B writing the SQL on CPU). Nothing here is generated in your browser. To ask your own questions,
+      run the app yourself; it needs about 4&nbsp;GB of RAM and no API keys.</p>
+  </header>
+
+  <section aria-labelledby="video-h">
+    <h2 id="video-h">Watch a live run</h2>
+    <p class="sub">Uploading the sample CSV, asking a question, reviewing and approving the SQL, then the answer.
+      Waiting for the model is fast-forwarded and labelled in the video.</p>
+    <video controls preload="metadata" playsinline poster="assets/poster.png">
+      <source src="assets/live-run.mp4" type="video/mp4">
+      Your browser can't play this video. <a href="assets/live-run.mp4">Download it</a>.
+    </video>
+  </section>
+
+  <section aria-labelledby="try-h">
+    <h2 id="try-h">Try the recorded runs</h2>
+    <p class="sub">Pick a question, look at the SQL the model proposed, then approve it, as you would in the live app.</p>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tab-shop" aria-selected="true" aria-controls="replay">Demo shop database</button>
+      <button class="tab" role="tab" id="tab-csv" aria-selected="false" aria-controls="replay">Uploaded CSV</button>
+    </div>
+    <div id="filebox"></div>
+    <div class="replay" id="replay" role="tabpanel">
+      <div class="card qlist" id="qlist"></div>
+      <div class="card panel" id="panel" aria-live="polite"><p class="empty">Choose a question on the left.</p></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="eval-h">
+    <h2 id="eval-h">Evaluation</h2>
+    <p class="sub">52 questions with hand-written reference SQL on the demo shop (34 with a single correct answer, plus
+      ambiguous, unanswerable and adversarial ones) and 11 on a CSV none of the models had seen. Both 3B models get the
+      identical prompt, so only the weights differ.</p>
+    <div class="card tablewrap"><table class="evals" id="evals"></table></div>
+    <p class="meta">At 3B neither model is clearly better: the fine-tune wins on the unseen CSV and loses on the shop,
+      mostly by answering in benchmark shape (only the asked-for value, no measure to chart). Sending only
+      question-relevant hints lifted the fine-tune from 35% to 62% on the shop questions. Full scorecards are in the repository.</p>
+  </section>
+
+  <section aria-labelledby="how-h">
+    <h2 id="how-h">How it works</h2>
+    <p class="sub">A LangGraph state machine. Every step that touches data goes through an MCP server.</p>
+    <div class="flow">
+      <div><b>Load schema</b><p>MCP <code>describe_schema</code>: tables, sample rows and dataset notes.</p></div>
+      <div><b>Write SQL</b><p>SQLForge-3B in its training format, with only the hints this question needs.</p></div>
+      <div><b>Human approval</b><p>LangGraph <code>interrupt()</code>: approve, edit or reject.</p></div>
+      <div><b>Run read-only</b><p>SQL guard plus a read-only connection. Errors go back to the model to self-correct.</p></div>
+      <div><b>Chart</b><p>Chart type chosen by a small model; long-format results split into series.</p></div>
+      <div><b>Summarize</b><p>Facts computed in code; a summary with any untraceable number is replaced.</p></div>
+    </div>
+  </section>
+
+  <section id="run" aria-labelledby="run-h">
+    <h2 id="run-h">Run it yourself</h2>
+    <p class="sub">The live app (both tabs, your own CSVs) runs on any machine with about 4 GB of free RAM. The models
+      download on first start.</p>
+    <pre class="cmd">git clone __REPO_URL__ &amp;&amp; cd agent_analyst
+pip install -r requirements.txt -r requirements-app.txt
+ANALYST_SQL_MODEL=hf://ay2r/sqlforge-3b/gguf/sqlforge-3b-Q4_K_M.gguf python app.py   # http://127.0.0.1:7860</pre>
+    <p class="meta">Or with Docker: <code>docker build -t analyst . &amp;&amp; docker run -p 7860:7860 analyst</code>.
+      Sample file used on this page: <a href="assets/sample_coffee_sales.csv">sample_coffee_sales.csv</a>.</p>
+  </section>
+
+  <footer>Built with LangGraph, MCP, llama.cpp and matplotlib. Model:
+    <a id="model-link-2" href="#">SQLForge-3B</a>. Every answer on this page was produced by the agent and checked
+    against reference SQL.</footer>
+</div>
+
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(function () {
+  "use strict";
+  var D = JSON.parse(document.getElementById("data").textContent);
+  var $ = function (id) { return document.getElementById(id); };
+  $("model-link").href = D.model_url; $("model-link-2").href = D.model_url;
+
+  // theme toggle (remembered per browser; works without storage too)
+  var root = document.documentElement;
+  try { var saved = localStorage.getItem("theme"); if (saved) root.setAttribute("data-theme", saved); } catch (e) {}
+  function isDark() {
+    return root.getAttribute("data-theme") ? root.getAttribute("data-theme") === "dark"
+      : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  }
+  function label() { $("theme").textContent = isDark() ? "Light mode" : "Dark mode"; }
+  label();
+  $("theme").addEventListener("click", function () {
+    var next = isDark() ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("theme", next); } catch (e) {}
+    label();
+  });
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function inline(s) {
+    return esc(s)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[\s(])_([^_]+)_(?=[\s).,;:]|$)/g, "$1<em>$2</em>");
+  }
+  // Small Markdown renderer for the agent's summaries and the CSV overview (paragraphs, lists, tables).
+  function md(text) {
+    var lines = String(text || "").split("\n"), out = [], i = 0;
+    while (i < lines.length) {
+      var l = lines[i];
+      if (/^\s*\|/.test(l)) {
+        var rows = [];
+        while (i < lines.length && /^\s*\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+        var cells = rows.filter(function (r) { return !/^\s*\|[\s|:-]+\|\s*$/.test(r); })
+          .map(function (r) { return r.trim().replace(/^\||\|$/g, "").split("|"); });
+        var h = "<div class='tablewrap md-table'><table><thead><tr>" +
+          cells[0].map(function (c) { return "<th>" + inline(c.trim()) + "</th>"; }).join("") + "</tr></thead><tbody>";
+        cells.slice(1).forEach(function (r) {
+          h += "<tr>" + r.map(function (c) { return "<td>" + inline(c.trim()) + "</td>"; }).join("") + "</tr>";
+        });
+        out.push(h + "</tbody></table></div>");
+        continue;
+      }
+      if (/^\s*([-*]|\d+\.)\s+/.test(l)) {
+        var ordered = /^\s*\d+\./.test(l), items = [];
+        while (i < lines.length && /^\s*([-*]|\d+\.)\s+/.test(lines[i])) {
+          items.push("<li>" + inline(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, "")) + "</li>"); i++;
+        }
+        out.push((ordered ? "<ol>" : "<ul>") + items.join("") + (ordered ? "</ol>" : "</ul>"));
+        continue;
+      }
+      if (l.trim()) {
+        var para = [];
+        while (i < lines.length && lines[i].trim() && !/^\s*(\||[-*]\s|\d+\.\s)/.test(lines[i])) { para.push(lines[i]); i++; }
+        out.push("<p>" + inline(para.join(" ").replace(/^#+\s*/, "")) + "</p>");
+        continue;
+      }
+      i++;
+    }
+    return out.join("");
+  }
+  function fmt(v) {
+    if (v === null || v === undefined) return "";
+    if (typeof v === "number") {
+      return Number.isInteger(v) ? v.toLocaleString("en-US")
+        : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    }
+    return String(v);
+  }
+  function table(cols, rows, total) {
+    if (!rows || !rows.length) return "";
+    var num = cols.map(function (_, j) { return rows.every(function (r) { return r[j] == null || typeof r[j] === "number"; }); });
+    var h = "<div class='tablewrap'><table><thead><tr>" + cols.map(function (c, j) {
+      return "<th" + (num[j] ? " class='num'" : "") + ">" + esc(c) + "</th>"; }).join("") + "</tr></thead><tbody>";
+    rows.forEach(function (r) {
+      h += "<tr>" + r.map(function (v, j) { return "<td" + (num[j] ? " class='num'" : "") + ">" + esc(fmt(v)) + "</td>"; }).join("") + "</tr>";
+    });
+    h += "</tbody></table></div>";
+    if (total > rows.length) h += "<p class='meta'>Showing " + rows.length + " of " + total + " rows.</p>";
+    return h;
+  }
+
+  var current = "shop";
+  function runs() { return current === "shop" ? D.shop : D.csv.runs; }
+
+  function renderList() {
+    var list = runs(), h = "<h3>" + (current === "shop" ? "Questions about the shop" : "Questions about the CSV") + "</h3>";
+    list.forEach(function (r, i) {
+      var tag = r.status === "unanswerable" ? "declined" : (r.attempts.length ? "self-corrected" : "");
+      h += "<button class='q' type='button' aria-pressed='false' data-i='" + i + "'>" + esc(r.question) +
+        (tag ? "<small>" + tag + "</small>" : "") + "</button>";
+    });
+    $("qlist").innerHTML = h;
+    Array.prototype.forEach.call($("qlist").querySelectorAll(".q"), function (b) {
+      b.addEventListener("click", function () {
+        Array.prototype.forEach.call($("qlist").querySelectorAll(".q"), function (x) { x.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        showProposal(list[+b.getAttribute("data-i")]);
+      });
+    });
+    $("panel").innerHTML = "<p class='empty'>Choose a question on the left.</p>";
+  }
+
+  function renderFilebox() {
+    if (current !== "csv") { $("filebox").innerHTML = ""; return; }
+    var c = D.csv;
+    $("filebox").innerHTML = "<div class='card filebox'><div class='row'><strong>" + esc(c.file) + "</strong>" +
+      "<span class='meta' style='margin:0'>" + c.rows.toLocaleString("en-US") + " rows, imported as table <code>" + esc(c.table) +
+      "</code></span><a href='assets/" + esc(c.file) + "'>download</a></div>" +
+      "<p class='meta'>Definition typed by the user: <code>" + esc(c.notes) + "</code></p>" +
+      "<details><summary>Data overview (computed directly from the file, no model involved)</summary>" + md(c.overview) + "</details></div>";
+  }
+
+  function showProposal(r) {
+    var h = "<p class='ask'>" + esc(r.question) + "</p>";
+    if (r.status === "unanswerable") {
+      h += "<span class='badge warn'>Declined, nothing was run</span>" +
+        "<div class='step summary'><p>The agent judged that the data can't answer this, or that it asks to change the " +
+        "database, and this agent is read-only.</p><p class='meta'>Model's reason: " + esc(r.rationale) + "</p></div>";
+      $("panel").innerHTML = h; return;
+    }
+    if (r.attempts.length) {
+      h += "<div class='step'><p class='label'>Earlier attempts failed and were corrected</p>";
+      r.attempts.forEach(function (a, i) {
+        h += "<div class='attempt'><p class='err'>Attempt " + (i + 1) + ": " + esc(a.error) + "</p><pre class='sql'>" + esc(a.sql) + "</pre></div>";
+      });
+      h += "</div>";
+    }
+    h += "<div class='step'><p class='label'>Proposed SQL" + (r.attempts.length ? " (corrected)" : "") + "</p>" +
+      "<pre class='sql'>" + esc(r.sql) + "</pre><div class='actions'>" +
+      "<button class='btn primary' type='button' id='approve'>Approve &amp; run</button>" +
+      "<button class='btn' type='button' id='reject'>Reject</button></div></div>";
+    $("panel").innerHTML = h;
+    $("approve").addEventListener("click", function () { showResult(r); });
+    $("reject").addEventListener("click", function () {
+      $("approve").disabled = true; $("reject").disabled = true;
+      $("panel").insertAdjacentHTML("beforeend", "<div class='step'><span class='badge bad'>Rejected</span>" +
+        "<p class='meta'>Nothing was run. In the live app you can also edit the SQL before approving it.</p></div>");
+    });
+  }
+
+  function showResult(r) {
+    $("approve").disabled = true; $("reject").disabled = true;
+    var h = "<div class='step'><span class='badge ok'>Answered</span>" +
+      (r.attempts.length ? " <span class='badge warn'>self-corrected after " + r.attempts.length + " failed quer" +
+        (r.attempts.length === 1 ? "y" : "ies") + "</span>" : "") + "</div>" +
+      "<div class='step summary'>" + md(r.summary) + "</div>";
+    if (r.chart) h += "<div class='step chart'><img src='" + esc(r.chart) + "' alt='Chart for: " + esc(r.question) + "' loading='lazy'></div>";
+    h += "<div class='step'>" + table(r.columns, r.rows, r.total_rows) + "</div>";
+    h += "<details><summary>What the agent did</summary><ol>" + r.events.map(function (e) { return "<li>" + esc(e) + "</li>"; }).join("") + "</ol></details>";
+    if (r.seconds) h += "<p class='meta'>Recorded run: " + r.seconds + " s end to end on 4 CPU cores.</p>";
+    $("panel").insertAdjacentHTML("beforeend", h);
+  }
+
+  function select(which) {
+    current = which;
+    $("tab-shop").setAttribute("aria-selected", String(which === "shop"));
+    $("tab-csv").setAttribute("aria-selected", String(which === "csv"));
+    renderFilebox(); renderList();
+  }
+  $("tab-shop").addEventListener("click", function () { select("shop"); });
+  $("tab-csv").addEventListener("click", function () { select("csv"); });
+  select("shop");
+
+  // evaluation table
+  var E = D.evals, eh = "<thead><tr><th>Metric</th>" + E.columns.map(function (c) { return "<th class='num'>" + esc(c) + "</th>"; }).join("") + "</tr></thead><tbody>";
+  E.rows.forEach(function (row, k) {
+    var unit = row[4];
+    eh += "<tr" + (k < 2 ? " class='hl'" : "") + "><td>" + esc(row[0]) + "</td>" + row.slice(1, 4).map(function (v) {
+      var shown = v === null || v === undefined ? "–"
+        : (unit === "s" ? Math.round(v) + " s" : (Number.isInteger(v) ? v : v.toFixed(1)) + (unit === "%" ? "%" : ""));
+      return "<td class='v'>" + esc(shown) + "</td>";
+    }).join("") + "</tr>";
+  });
+  $("evals").innerHTML = eh + "</tbody>";
+})();
+</script>
+</body>
+</html>

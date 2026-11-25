@@ -127,3 +127,9 @@ def test_hints_only_include_notes_the_question_mentions():
     ev = relevant_evidence("What is monthly revenue?", notes)
     assert "SUM(x)" in ev and "ISO text" in ev
     assert "100.0 * part" in relevant_evidence("What is the return rate?", notes)
+
+
+def test_quarter_tip_only_for_quarter_questions():
+    from analyst.specialist import relevant_evidence
+    assert "Q3 = July-September" in relevant_evidence("Revenue by category in Q3 2026?", "")
+    assert "Q3 = July" not in relevant_evidence("Revenue by category in 2026?", "")

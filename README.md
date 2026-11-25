@@ -189,22 +189,33 @@ python app.py                      # http://127.0.0.1:7860 (downloads the 3B mod
 ANALYST_LLM=mock python app.py     # UI only, no model
 ```
 
-**Hosting: Hugging Face Spaces, free CPU tier (Gradio Space).** `deploy/hf_space.py` publishes
-the app as a Gradio Space: Hugging Face installs a generated `requirements.txt` (llama.cpp comes
-as a prebuilt wheel, so nothing is compiled) and runs `app.py`, which seeds the demo database and
-downloads the two 3B models (~4 GB) in the background at boot. Free CPU Spaces have 2 vCPU and
-16 GB RAM, and the URL is public and permanent. Measured on 2 CPUs: example buttons are instant;
-the first live question takes about 3 minutes (models load), later ones 1–2 minutes. The Space
-sleeps after 48 hours without visitors and wakes on the next visit.
+**Hosting.** Two pieces, both free for low traffic:
 
-```bash
-pip install huggingface_hub && huggingface-cli login        # a write token
-python deploy/hf_space.py --space <hf-user>/ai-data-analyst \
-    --repo-url https://github.com/<github-user>/agent_analyst
-python deploy/hf_space.py --stage space/                    # optional: see exactly what is uploaded
-```
+1. **Static demo page (free, always on): a Hugging Face static Space.** `deploy/build_static.py`
+   builds a single page that replays real recorded runs (pick a question, see the proposed SQL,
+   approve it, get the chart, summary and table), plays a screen recording of a live run, and
+   shows the evaluation. Nothing runs a model, and the page says the runs are recorded.
 
-`--sdk docker` publishes a Docker Space instead, built from the `Dockerfile`.
+   ```bash
+   python app.py --build-cache            # re-record the example runs (needs the models)
+   python deploy/build_static.py          # -> site/ ; preview: python -m http.server -d site
+   huggingface-cli login                  # a write token
+   python deploy/hf_space.py --space <hf-user>/ai-data-analyst --repo-url https://github.com/<you>/agent_analyst
+   ```
+   The `site/` folder also works on GitHub Pages or any static host.
+
+2. **Live app (optional): Modal.** `deploy/modal_app.py` runs `app.py` on Modal with the models
+   baked into the image. It scales to zero, so it only uses credits while someone is on it (the
+   Starter plan includes monthly free credits; check modal.com/pricing). The next visitor after
+   an idle period waits about a minute for a cold start.
+
+   ```bash
+   pip install modal && modal setup
+   modal deploy deploy/modal_app.py       # prints https://<you>--ai-data-analyst-web.modal.run
+   ```
+
+Hugging Face Gradio/Docker Spaces can also run the live app (`--sdk gradio` / `--sdk docker`),
+but on the cpu-basic tier they need a PRO subscription.
 
 The same image runs anywhere Docker does (Render, Fly.io, Google Cloud Run):
 `docker build -t analyst . && docker run -p 7860:7860 analyst`. The public demo is safe to

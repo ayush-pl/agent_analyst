@@ -55,6 +55,8 @@ DEFAULT_GENERAL_MODEL = "hf://Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/qwen2.5-coder-
 # definitions come from the "-- note:" lines of the schema (the dataset's notes file).
 # Generic SQLite tips, each sent only when the question needs it (see relevant_evidence).
 TIME_TIP = "dates are ISO text, use strftime('%Y-%m', col) for months and strftime('%Y', col) for years."
+QUARTER_TIP = ("Quarters: Q1 = January-March (months 01-03), Q2 = April-June (04-06), "
+               "Q3 = July-September (07-09), Q4 = October-December (10-12).")
 RATIO_TIP = "SQLite integer division truncates, so compute rates and percentages as 100.0 * part / total."
 # Spider/BIRD gold queries return only the asked-for value, so fine-tuned models learn to drop
 # labels and measures; an analytics agent needs both to chart and summarize the result.
@@ -102,6 +104,8 @@ def relevant_evidence(question: str, notes: str, always: str = OUTPUT_TIP) -> st
             keep.append(sent)
     if timey and not any("strftime" in k for k in keep):
         keep.append(TIME_TIP)
+    if re.search(r"\bq[1-4]\b|quarter", question, re.I):
+        keep.append(QUARTER_TIP)
     if _RATIO_WORDS.search(question):
         keep.append(RATIO_TIP)
     keep.append(always)

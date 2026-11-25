@@ -118,6 +118,17 @@ async def get_analyst(db: str):
 
 # ---------------------------------------------------------------- rendering
 
+def pretty_sql(sql: str) -> str:
+    """Line breaks before the main clauses, for reading one-line model output in the review box."""
+    import re
+
+    if "\n" in (sql or "").strip():
+        return sql
+    out = re.sub(r"\s+(FROM|WHERE|GROUP BY|HAVING|ORDER BY|LIMIT|UNION ALL|UNION|"
+                 r"(?:INNER |LEFT |RIGHT |CROSS )?JOIN)\b", r"\n\1", sql or "", flags=re.I)
+    return re.sub(r"\s+(AND|OR)\s+", r"\n  \1 ", out, flags=re.I)
+
+
 def display_columns(cols: list[str]) -> list[str]:
     """Readable headers for unaliased SQL expressions (Spider-style models rarely alias columns)."""
     import re
@@ -170,7 +181,7 @@ def render(state: dict, note: str = ""):
     has_rows = table is not None and len(table) > 0
     return (f"{badge}{'  ·  ' + note if note else ''}", summary,
             gr.update(value=chart, visible=bool(chart)), gr.update(value=table, visible=has_rows),
-            state.get("sql") or "", trace)
+            pretty_sql(state.get("sql") or ""), trace)
 
 
 def cached(question: str):
@@ -214,7 +225,7 @@ async def ask(question: str, require_approval: bool, db: str | None):
     if run.pending_approval:
         p = run.pending_approval
         status = "⏸️ Waiting for your approval. Review or edit the SQL, then run it."
-        return (run.thread_id, p["sql"], gr.update(visible=True), status,
+        return (run.thread_id, pretty_sql(p["sql"]), gr.update(visible=True), status,
                 f"_{p.get('rationale', '')}_", None, *_EMPTY)
     s = render(run.state)
     return (None, "", gr.update(visible=False), *s[:1], "", *s[1:])
@@ -238,7 +249,7 @@ async def decide(thread_id: str | None, sql: str, action: str, proposed: str | N
     if run.pending_approval:   # a failed query was corrected and needs approval again
         p = run.pending_approval
         errs = "; ".join(p.get("previous_errors", []))
-        return (run.thread_id, p["sql"], gr.update(visible=True),
+        return (run.thread_id, pretty_sql(p["sql"]), gr.update(visible=True),
                 f"🔁 The query failed ({errs}). The SQL model corrected it. Approve the new version?",
                 f"_{p.get('rationale', '')}_", None, *_EMPTY)
     s = render(run.state)
@@ -432,25 +443,44 @@ def build_ui():
 
 # ---------------------------------------------------------------- example cache
 
-async def build_cache() -> None:
+async def _record(db: str, questions: list[str], prefix: str) -> list[dict]:
+    """Run questions through the agent (no approval) and keep what the UI needs to replay them."""
     from analyst.agent import DataAnalyst
 
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     items = []
-    async with DataAnalyst(db_path=str(DB_PATH), require_approval=False, output_dir=str(OUT_DIR)) as a:
-        for qtext in EXAMPLES:
+    async with DataAnalyst(db_path=db, require_approval=False, output_dir=str(OUT_DIR)) as a:
+        for qtext in questions:
+            t0 = time.time()
             run = await a.ask(qtext)
             st = {k: run.state.get(k) for k in
                   ("question", "status", "sql", "rationale", "attempts", "summary", "events", "chart_path")}
             res = run.state.get("result") or {}
             st["result"] = {"columns": res.get("columns"), "rows": (res.get("rows") or [])[:100]} if res else None
             if st.get("chart_path"):
-                name = f"example-{len(items) + 1}.png"
+                name = f"{prefix}-{len(items) + 1}.png"
                 shutil.copy(st["chart_path"], CACHE_DIR / name)
                 st["chart_path"] = name
-            items.append({"question": qtext, "model": a.llm.name, "state": st})
+            items.append({"question": qtext, "model": a.llm.name, "seconds": round(time.time() - t0), "state": st})
             print(f"{st['status']:>12}  {qtext}", flush=True)
+    return items
+
+
+async def build_cache(csv: bool = True) -> None:
+    """Record the demo-shop examples, and the sample CSV's suggested questions."""
+    from analyst.datasets import import_csv, profile, suggest_questions
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    items = await _record(str(DB_PATH), EXAMPLES, "example")
     (CACHE_DIR / "examples.json").write_text(json.dumps(items, indent=1, default=str))
+    if csv:
+        db = OUT_DIR / "sample-csv.db"
+        info = import_csv(SAMPLE_CSV, db, user_notes=SAMPLE_NOTES)
+        qs = suggest_questions(info.db_path, info.table, N_SUGGEST, SAMPLE_NOTES)
+        runs = await _record(str(db), qs, "csv-example")
+        (CACHE_DIR / "csv_examples.json").write_text(json.dumps({
+            "file": SAMPLE_CSV.name, "notes": SAMPLE_NOTES, "table": info.table, "rows": info.rows,
+            "renamed": info.renamed, "overview": profile(info.db_path, info.table), "runs": runs,
+        }, indent=1, default=str))
 
 
 if __name__ == "__main__":
