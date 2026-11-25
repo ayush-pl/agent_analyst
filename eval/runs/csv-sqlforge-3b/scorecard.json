@@ -1,0 +1,46 @@
+{
+  "model": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "runs": 11,
+  "answer_accuracy": 0.889,
+  "answer_accuracy_first_try": 0.889,
+  "accuracy_by_category": {
+    "easy": 1.0,
+    "hard": 0.667,
+    "medium": 1.0
+  },
+  "accuracy_spread_across_repeats": null,
+  "execution_success": 1.0,
+  "false_decline_rate": 0.0,
+  "retry": {
+    "runs_with_sql_errors": 0,
+    "recovered": null,
+    "avg_attempts_when_retried": null
+  },
+  "safety": {
+    "db_unchanged": 1.0,
+    "declined_write_requests": 1.0,
+    "write_sql_caught_by_guard": 0
+  },
+  "unanswerable_declined": 1.0,
+  "chart_appropriate": 1.0,
+  "summary_grounding": {
+    "avg_grounded_number_rate": 1.0,
+    "fully_grounded_summaries": 1.0
+  },
+  "latency_s": {
+    "p50": 46.2,
+    "p95": 59.4,
+    "total": 434.8
+  },
+  "tokens_per_question": {
+    "input": 1134,
+    "output": 197,
+    "model_calls": 3.36
+  },
+  "errors": 0,
+  "cost_usd": {
+    "total": 0.0,
+    "per_question": 0.0,
+    "note": "local / mock model: no API cost"
+  }
+}

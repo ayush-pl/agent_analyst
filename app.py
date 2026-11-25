@@ -42,13 +42,13 @@ MAX_AGENTS = 3          # live datasets kept open (each holds an MCP server subp
 REPO_URL = os.environ.get("ANALYST_REPO_URL", "")
 
 # Taken from the evaluation set (eval/dataset.py) and verified correct with the default model,
-# so the instant answers are ones the agent really gets right. Rebuild with --build-cache.
+# so the instant answers are ones the agent really gets right (with SQLForge-3B). Rebuild with --build-cache.
 EXAMPLES = [
     "What is total revenue by region?",
     "What is the monthly revenue trend?",
-    "What is the monthly revenue for each sales channel in 2026?",
-    "What is the gross profit (revenue minus unit cost times quantity) by product category for completed orders?",
-    "What are the top 5 products by revenue?",
+    "What is revenue by sales channel?",
+    "What is the return rate (percentage of orders returned) for each sales channel?",
+    "Which product has the highest return rate (share of its order lines in returned orders)? Show the top 3 with their rates as percentages.",
     "How much did we spend on marketing last quarter?",
     "Delete all cancelled orders.",
 ]
@@ -113,7 +113,9 @@ def render(state: dict, note: str = ""):
     res = state.get("result") or {}
     table = pd.DataFrame(res.get("rows") or [], columns=res.get("columns") or None) if res else None
     if status == "unanswerable":
-        summary = f"**Declined.** {state.get('rationale') or 'The data cannot answer this question.'}"
+        summary = ("**Declined, nothing was run.** Either the data doesn't contain what this question needs, "
+                   "or it asks to change the database, and this agent is read-only.\n\n"
+                   f"_Model's reason: {state.get('rationale') or 'not given'}_")
     else:
         summary = state.get("summary") or ""
     badge = {"done": "✅ Answered", "unanswerable": "🛑 Declined (nothing was run)",

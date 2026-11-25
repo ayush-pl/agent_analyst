@@ -6,7 +6,7 @@ errors**, renders a **chart**, and writes a **summary**. The SQL can come from a
 **fine-tuned open text-to-SQL model** (Qwen2.5-Coder-3B + QLoRA, running on CPU via llama.cpp),
 from **Claude** (`claude-opus-5-5`), or from any OpenAI-compatible model server.
 
-**Live demo:** _add your Hugging Face Space link here_ · see [Web demo and hosting](#web-demo-and-hosting)
+**Live demo:** _add your Hugging Face Space link here_ · SQL model: [SQLForge-3B](https://huggingface.co/ay2r/sqlforge-3b) · see [Web demo and hosting](#web-demo-and-hosting)
 
 ```
           ┌──────────────┐
@@ -157,17 +157,23 @@ but it was never trained to refuse, choose charts or write prose, so the work is
 | **Execution-guided self-correction**: a failed query, the database error and a schema-based fix hint (e.g. "`region` lives in `customers`") go back to the specialist; a query that repeats a failed one is resampled | specialist, driven by the LangGraph retry loop |
 | Read-only/answerable gate, chart plan, summary | small generalist (`ANALYST_GENERAL_MODEL`, default Qwen2.5-Coder-3B-Instruct Q4_K_M) |
 
-Both models run in-process through llama.cpp, so no server and no API key are needed. If
-your training prompt differs from the default, point `ANALYST_SQL_PROMPT` at a template file
-with `{schema}`, `{question}` and `{evidence}` placeholders, and set `ANALYST_SQL_SCHEMA=ddl`
-if you trained on CREATE TABLE statements only.
+Both models run in-process through llama.cpp, so no server and no API key are needed.
 
-To export a QLoRA adapter to the quantized GGUF this needs (merge → convert → Q4_K_M → upload
-to the Hugging Face Hub), run `deploy/export_gguf.py`; its docstring has the exact commands.
+The default SQL model is [SQLForge-3B](https://huggingface.co/ay2r/sqlforge-3b) (its Q4_K_M
+GGUF), prompted in its exact training format (`ANALYST_SQL_FORMAT=sqlforge`): its system prompt,
+`### Database schema / ### Question / ### Hint / ### SQL` sections and `-- 1 | Joe | ...`
+sample rows. Two adaptations make a BIRD-trained model work inside an agent:
 
-```bash
-ANALYST_SQL_MODEL=hf://<hf-user>/<your-model>-GGUF/model-q4_k_m.gguf python -m eval.run_eval --llm specialist
-```
+- **Question-relevant hints.** BIRD hints are always about the question, so the model applies
+  every hint it gets. Only the dataset notes whose subject the question mentions are sent, plus
+  the SQLite tips it needs (dates for time questions, `100.0 *` for rates).
+- **Analytics-shaped output.** A short hint asks for the grouping column plus the measure, since
+  Spider/BIRD answers return only the asked-for value.
+
+For another fine-tune: set `ANALYST_SQL_MODEL=hf://owner/repo/file.gguf`, and if its training
+prompt differs, point `ANALYST_SQL_PROMPT` at a template file with `{schema}`, `{question}`
+and `{evidence}` placeholders (`ANALYST_SQL_SCHEMA=ddl` if it was trained on CREATE TABLE
+statements only). `deploy/export_gguf.py` turns a QLoRA adapter into the GGUF this needs.
 
 ## Web demo and hosting
 
@@ -191,7 +197,6 @@ A live question takes 1–2 minutes there (measured with the image limited to 2 
 ```bash
 pip install huggingface_hub && huggingface-cli login        # a write token
 python deploy/hf_space.py --space <hf-user>/ai-data-analyst \
-    --sql-model hf://<hf-user>/<your-model>-GGUF/model-q4_k_m.gguf \
     --repo-url https://github.com/<github-user>/agent_analyst
 ```
 
@@ -245,31 +250,45 @@ python -m eval.run_eval --llm local --ids e01,h01     # subset; --category hard;
 python -m eval.report eval/runs/<run>                 # rebuild a scorecard
 ```
 
-**Results with open models on CPU** (full scorecards in `eval/runs/`):
+**Results with open models on CPU** (full scorecards in `eval/runs/`). The two 3B columns use
+the identical prompt (SQLForge-3B's training format with question-relevant hints), so only the
+weights differ:
 
-| Metric | Qwen2.5-Coder-7B (`local`) | Qwen2.5-Coder-3B, not fine-tuned (`specialist`) |
-|---|---|---|
-| Answer accuracy (34 questions with a reference) | 73.5% | 64.7% |
-| &nbsp;&nbsp;easy / medium / hard | 91.7 / 75.0 / 50.0% | 83.3 / 75.0 / 30.0% |
-| Query ran successfully | 97.5% | 95.0% |
-| SQL errors recovered by self-correction | 4 of 5 | 9 of 9 |
-| Safety: database unchanged under 6 write/injection attempts | 100% | 100% |
-| Unanswerable questions declined | 83.3% | 50.0% |
-| Summary numbers traceable to the data | 79.6% | 97.0% (checked summaries + exact fallback) |
-| Latency per question p50 / p95 (4 CPU cores) | 90 s / 197 s | 46 s / 78 s |
+| Metric | Qwen2.5-Coder-7B (`local`) | Qwen2.5-Coder-3B, stock | [SQLForge-3B](https://huggingface.co/ay2r/sqlforge-3b) (fine-tuned) |
+|---|---|---|---|
+| Shop: answer accuracy (34 questions with a reference) | 73.5% | 73.5% | 61.8% |
+| &nbsp;&nbsp;easy / medium / hard | 91.7 / 75.0 / 50.0% | 91.7 / 83.3 / 40.0% | 91.7 / 58.3 / 30.0% |
+| Unseen CSV: answers matching the reference (9) | – | 7 / 9 | **8 / 9** |
+| Query ran successfully (shop) | 97.5% | 95.0% | 95.0% |
+| Safety: database unchanged under 6 write/injection attempts | 100% | 100% | 100% |
+| Unanswerable questions declined (shop / CSV) | 83.3% / – | 50% / 100% | 50% / 100% |
+| Summary numbers traceable to the data | 79.6% | 97.0% | 99.4% |
+| Latency per question p50 / p95 (4 CPU cores) | 90 s / 197 s | 42 s / 82 s | 38 s / 75 s |
 
-**Uploaded CSV** (`eval/run_csv_eval.py`, a file the model never saw, Qwen2.5-Coder-3B
-`specialist`): 7 of 9 answers match the reference, the unanswerable question is declined, the
-delete request is blocked, and 100% of summary numbers trace to the data.
+What the comparison shows:
 
-The 3B numbers use the dataset-notes prompt layout (`eval/runs/qwen2.5-coder-3b-base-specialist-notes`);
-an earlier run with the shop rules hard-coded in the prompt scored 52.9%
-(`eval/runs/qwen2.5-coder-3b-base-specialist`). Each run is a single deterministic pass over
-34 scored questions, so differences of a few points are within noise.
+- **No clear winner at 3B.** Across all 43 scored questions the fine-tune gets 29 right and the
+  stock model 32. The difference is a handful of questions in each direction, which is within the
+  noise of a test set this size.
+- **Where the fine-tune loses, it answers in benchmark shape.** Spider/BIRD reference queries
+  return only the asked-for value, so "which segment generates the most revenue? Show revenue for
+  each segment" gets `LIMIT 1`, and "top 5 products by revenue" returns names without the revenue.
+  An analytics agent needs the label and the measure to chart and summarize.
+- **Where it wins, it follows the exact logic** (e.g. averaging the right column, filtering the
+  right months).
+- **Prompting mattered more than weights.** Sending every dataset note as a BIRD hint dropped the
+  fine-tune to 35.3%, because a BIRD-trained model applies every hint it sees (it filtered
+  "customers per region" to completed orders). Sending only the notes the question mentions
+  brought it to 61.8%.
 
-The 3B column is the baseline for a fine-tuned 3B SQL model: run
-`ANALYST_SQL_MODEL=... python -m eval.run_eval --llm specialist` with your weights to get
-the same scorecard for the fine-tune.
+Run the comparison yourself:
+
+```bash
+export ANALYST_SQL_MODEL=hf://ay2r/sqlforge-3b/gguf/sqlforge-3b-Q4_K_M.gguf
+python -m eval.run_eval --llm specialist && python -m eval.run_csv_eval --llm specialist
+unset ANALYST_SQL_MODEL; export ANALYST_SQL_FORMAT=sqlforge     # stock 3B, same prompt
+python -m eval.run_eval --llm specialist && python -m eval.run_csv_eval --llm specialist
+```
 
 Each run writes `results.jsonl` (one line per question: SQL, attempts, result, summary and scores),
 `scorecard.md` / `scorecard.json`, and the charts. Re-running with the same `--out`

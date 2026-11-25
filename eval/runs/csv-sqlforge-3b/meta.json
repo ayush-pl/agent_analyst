@@ -1,0 +1,8 @@
+{
+  "llm": "sql:sqlforge-3b-Q4_K_M + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "dataset": "sample_coffee_sales.csv",
+  "notes": "revenue = qty * unit_price * (1 - discount / 100). discount is a percentage.",
+  "started": "2026-11-25T12:26:36",
+  "repeats": 1,
+  "max_retries": 3
+}

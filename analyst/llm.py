@@ -343,6 +343,18 @@ def _additive(measure: str) -> bool:
     return not re.search(r"rate|pct|percent|avg|average|mean|ratio|share|margin|growth|price|discount|score|age", measure, re.I)
 
 
+def _label(col: str) -> str:
+    """Readable measure name; unaliased expressions (common in Spider-style SQL) become "value"."""
+    return col.replace("_", " ") if re.fullmatch(r"\w+", col) else "value"
+
+
+def _additive_col(col: str) -> bool:
+    if re.fullmatch(r"\w+", col):
+        return _additive(col)
+    c = col.upper().strip()
+    return c.startswith(("SUM(", "COUNT(")) and "/" not in c and "AVG(" not in c
+
+
 def fact_summary(question: str, columns: Sequence[str], rows: Sequence[Sequence[Any]],
                  chart: ChartSpec | None = None) -> str:
     """Deterministic summary computed from the result: every number is exact."""
@@ -354,7 +366,7 @@ def fact_summary(question: str, columns: Sequence[str], rows: Sequence[Sequence[
     if spec.chart_type == "none" or not spec.x or not spec.y or len(rows) == 1:
         def fmt(v: Any) -> str:
             return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}" if isinstance(v, int) else str(v)
-        parts = [f"{c.replace('_', ' ')}: **{fmt(v)}**" for c, v in zip(cols, rows[0])]
+        parts = [f"{_label(c)}: **{fmt(v)}**" for c, v in zip(cols, rows[0])]
         extra = f"\n\n({len(rows)} rows; showing the first)" if len(rows) > 1 else ""
         return "**Answer:** " + " · ".join(parts) + extra
     xi, yi = cols.index(spec.x), cols.index(spec.y)
@@ -363,14 +375,19 @@ def fact_summary(question: str, columns: Sequence[str], rows: Sequence[Sequence[
         totals: dict[str, float] = {}
         for r in rows:
             totals[str(r[si])] = totals.get(str(r[si]), 0) + float(r[yi])
+        if not _additive_col(spec.y):   # rates/averages: compare the mean per series, never sum
+            counts = {k: sum(1 for r in rows if str(r[si]) == k) for k in totals}
+            avgs = sorted(((k, totals[k] / counts[k]) for k in totals), key=lambda kv: -kv[1])
+            return (f"**{avgs[0][0]}** has the highest average {_label(spec.y)} "
+                    f"({avgs[0][1]:,.2f}).\n\n" + "\n".join(f"- **{k}**: {v:,.2f} on average" for k, v in avgs))
         grand = sum(totals.values()) or 1
         ranked = sorted(totals.items(), key=lambda kv: -kv[1])
         lines = [f"- **{k}**: {v:,.2f} ({100 * v / grand:.1f}% of total)" for k, v in ranked]
-        return (f"**{ranked[0][0]}** leads on {spec.y.replace('_', ' ')} with {ranked[0][1]:,.2f} "
+        return (f"**{ranked[0][0]}** leads on {_label(spec.y)} with {ranked[0][1]:,.2f} "
                 f"across the period.\n\n" + "\n".join(lines))
     vals = [(str(r[xi]), float(r[yi])) for r in rows]
     total = sum(v for _, v in vals)
-    measure = spec.y.replace("_", " ")
+    measure = _label(spec.y)
     if spec.chart_type == "line":
         first, last = vals[0], vals[-1]
         peak = max(vals, key=lambda kv: kv[1])
@@ -380,7 +397,7 @@ def fact_summary(question: str, columns: Sequence[str], rows: Sequence[Sequence[
                 f"- Total over {len(vals)} periods: {total:,.2f}\n"
                 f"- Average per period: {total / len(vals):,.2f}")
     top, bottom = max(vals, key=lambda kv: kv[1]), min(vals, key=lambda kv: kv[1])
-    share = f" ({100 * top[1] / total:.1f}% of the total)" if total and _additive(spec.y) else ""
+    share = f" ({100 * top[1] / total:.1f}% of the total)" if total and _additive_col(spec.y) else ""
     return (f"**{top[0]}** is highest on {measure} at {top[1]:,.2f}{share}.\n\n"
             f"- Lowest: {bottom[0]} at {bottom[1]:,.2f}\n"
             f"- Gap between highest and lowest: {top[1] - bottom[1]:,.2f}\n"

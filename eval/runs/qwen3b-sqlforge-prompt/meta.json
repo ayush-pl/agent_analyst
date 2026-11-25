@@ -1,0 +1,7 @@
+{
+  "llm": "sql:qwen2.5-coder-3b-instruct-q4_k_m + llama.cpp:qwen2.5-coder-3b-instruct-q4_k_m",
+  "started": "2026-11-25T13:13:28",
+  "max_retries": 3,
+  "repeats": 1,
+  "n_cases": 52
+}
