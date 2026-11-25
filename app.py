@@ -24,6 +24,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -76,6 +77,19 @@ def schema_markdown(db: Path = DB_PATH) -> str:
     return "\n".join(lines)
 
 
+def prefetch_models() -> None:
+    """Download the GGUF files in the background so the first visitor does not wait for ~4 GB."""
+    try:
+        from analyst.specialist import DEFAULT_GENERAL_MODEL, resolve_model
+
+        for spec in (os.environ.get("ANALYST_GENERAL_MODEL", DEFAULT_GENERAL_MODEL),
+                     os.environ.get("ANALYST_SQL_MODEL", ""), os.environ.get("ANALYST_SQL_LORA", "")):
+            if spec:
+                print(f"model ready: {resolve_model(spec)}", flush=True)
+    except Exception as e:  # noqa: BLE001 - the first question will retry and show the error
+        print(f"model prefetch failed: {e}", flush=True)
+
+
 async def get_analyst(db: str):
     """One agent per dataset (each owns an MCP server subprocess); the models are shared.
 
@@ -104,6 +118,31 @@ async def get_analyst(db: str):
 
 # ---------------------------------------------------------------- rendering
 
+def display_columns(cols: list[str]) -> list[str]:
+    """Readable headers for unaliased SQL expressions (Spider-style models rarely alias columns)."""
+    import re
+
+    out, seen = [], set()
+    for c in cols:
+        if re.fullmatch(r"[\w ]+", c):
+            name = c
+        else:
+            low = c.lower()
+            fn = re.match(r"\s*(sum|avg|count|min|max|round|cast)\s*\(", low)
+            name = ("month" if "%y-%m" in low and "strftime" in low else
+                    "year" if "'%y'" in low and "strftime" in low else
+                    {"sum": "total", "avg": "average", "count": "count", "min": "minimum",
+                     "max": "maximum"}.get(fn.group(1) if fn else "", "value"))
+            if re.search(r"\b100(\.0)?\s*\*|\*\s*100(\.0)?\b", low) and "/" in low and name in ("value", "total"):
+                name = "percent"
+        base, i = name, 2
+        while name in seen:
+            name, i = f"{base}_{i}", i + 1
+        seen.add(name)
+        out.append(name)
+    return out
+
+
 def render(state: dict, note: str = ""):
     """State -> (status, summary, chart, table, sql, trace)."""
     import gradio as gr
@@ -111,7 +150,8 @@ def render(state: dict, note: str = ""):
 
     status = state.get("status", "")
     res = state.get("result") or {}
-    table = pd.DataFrame(res.get("rows") or [], columns=res.get("columns") or None) if res else None
+    cols = display_columns(res.get("columns") or [])
+    table = pd.DataFrame(res.get("rows") or [], columns=cols or None) if res else None
     if status == "unanswerable":
         summary = ("**Declined, nothing was run.** Either the data doesn't contain what this question needs, "
                    "or it asks to change the database, and this agent is read-only.\n\n"
@@ -423,6 +463,8 @@ if __name__ == "__main__":
         asyncio.run(build_cache())
     else:
         import gradio as gr
+        if os.environ.get("ANALYST_LLM") == "specialist":
+            threading.Thread(target=prefetch_models, daemon=True).start()
         build_ui().queue(default_concurrency_limit=1, max_size=20).launch(
             server_name=os.environ.get("HOST", "0.0.0.0"), server_port=args.port, css=CSS,
             theme=gr.themes.Soft(primary_hue="blue"), max_file_size="25mb",

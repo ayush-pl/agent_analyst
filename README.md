@@ -189,16 +189,22 @@ python app.py                      # http://127.0.0.1:7860 (downloads the 3B mod
 ANALYST_LLM=mock python app.py     # UI only, no model
 ```
 
-**Hosting: Hugging Face Spaces (free).** The repo has a `Dockerfile` that builds llama.cpp,
-seeds the demo database and downloads the models at build time. Free CPU Spaces have
-2 vCPU and 16 GB RAM, which fits two 3B Q4 models (~4 GB), and the URL is public and permanent.
-A live question takes 1–2 minutes there (measured with the image limited to 2 CPUs); the example buttons are instant. The Space sleeps after 48 hours without visitors and wakes on the next visit (about a minute).
+**Hosting: Hugging Face Spaces, free CPU tier (Gradio Space).** `deploy/hf_space.py` publishes
+the app as a Gradio Space: Hugging Face installs a generated `requirements.txt` (llama.cpp comes
+as a prebuilt wheel, so nothing is compiled) and runs `app.py`, which seeds the demo database and
+downloads the two 3B models (~4 GB) in the background at boot. Free CPU Spaces have 2 vCPU and
+16 GB RAM, and the URL is public and permanent. Measured on 2 CPUs: example buttons are instant;
+the first live question takes about 3 minutes (models load), later ones 1–2 minutes. The Space
+sleeps after 48 hours without visitors and wakes on the next visit.
 
 ```bash
 pip install huggingface_hub && huggingface-cli login        # a write token
 python deploy/hf_space.py --space <hf-user>/ai-data-analyst \
     --repo-url https://github.com/<github-user>/agent_analyst
+python deploy/hf_space.py --stage space/                    # optional: see exactly what is uploaded
 ```
+
+`--sdk docker` publishes a Docker Space instead, built from the `Dockerfile`.
 
 The same image runs anywhere Docker does (Render, Fly.io, Google Cloud Run):
 `docker build -t analyst . && docker run -p 7860:7860 analyst`. The public demo is safe to
