@@ -154,6 +154,28 @@ def sql_aliases(sql: str, tables: Sequence[str]) -> dict[str, str]:
     return out
 
 
+def closest_columns(name: str, tables: dict[str, list[str]], n: int = 3) -> list[str]:
+    """``table.column`` candidates for a column name that does not exist (case, underscores,
+    prefixes like customer_region -> customers.region, then fuzzy matching)."""
+    import difflib
+
+    def norm(x: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", x.lower())
+
+    pairs = [(t, c) for t, cols in tables.items() for c in cols]
+    target = norm(name)
+    exact = [(t, c) for t, c in pairs if norm(c) == target]
+    parts = [(t, c) for t, c in pairs if len(norm(c)) >= 4 and (norm(c) in target or target in norm(c))]
+    names = sorted({c for _, c in pairs})
+    fuzzy = difflib.get_close_matches(name.lower(), [c.lower() for c in names], n=n, cutoff=0.6)
+    ranked = exact or parts or [(t, c) for f in fuzzy for t, c in pairs if c.lower() == f]
+    out: list[str] = []
+    for t, c in ranked:
+        if f"{t}.{c}" not in out:
+            out.append(f"{t}.{c}")
+    return out[:n]
+
+
 def error_hint(error: str, schema: str, sql: str = "") -> str:
     """Turn a raw database error into a concrete fix hint using the schema.
 
@@ -175,6 +197,10 @@ def error_hint(error: str, schema: str, sql: str = "") -> str:
             return (f"Column `{col}` exists only in table(s) {', '.join(owners)}. JOIN that table "
                     f"(via its id column) and reference it as <table_or_alias>.{col}; make sure every "
                     "alias you use is defined in FROM/JOIN.")
+        # Fine-tuned models often invent near-miss names (pet_type for PetType): suggest the closest.
+        close = closest_columns(col, tables)
+        if close:
+            return f"No table has a column `{col}`. Did you mean {', '.join(close)}?"
         return f"No table has a column `{col}`. Use only columns listed in the schema."
     m = re.search(r"ambiguous column name: (?:\w+\.)?(\w+)", error)
     if m:

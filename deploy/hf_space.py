@@ -3,7 +3,6 @@
     pip install huggingface_hub
     huggingface-cli login                     # or export HF_TOKEN=... (a *write* token)
     python deploy/hf_space.py --space <hf-user>/ai-data-analyst \\
-        --sql-model hf://<hf-user>/qwen2.5-coder-3b-text2sql-GGUF/model-q4_k_m.gguf \\
         --repo-url https://github.com/<github-user>/agent_analyst
 
 The Space builds the Dockerfile at the repo root and serves app.py on port 7860.
@@ -32,7 +31,8 @@ short_description: LangGraph agent + fine-tuned text-to-SQL model, MCP tools
 # AI Data Analyst
 
 Ask a business question in plain English. A LangGraph agent writes SQL with a fine-tuned
-text-to-SQL model (Qwen2.5-Coder-3B + QLoRA on Spider/BIRD), waits for your approval, runs it
+text-to-SQL model, [SQLForge-3B](https://huggingface.co/ay2r/sqlforge-3b)
+(Qwen2.5-Coder-3B + QLoRA on Spider/BIRD), waits for your approval, runs it
 through MCP tools on a read-only SQLite database, corrects its own failed queries using the
 database error, then charts and summarizes the result.
 {repo_line}
@@ -47,7 +47,8 @@ IGNORE = [".git/*", "**/__pycache__/*", "*.pyc", ".venv/*", ".pytest_cache/*", "
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--space", required=True, help="<hf-user>/<space-name>")
-    ap.add_argument("--sql-model", default="", help="fine-tuned GGUF: local path is NOT allowed here, use hf://repo/file")
+    ap.add_argument("--sql-model", default="hf://ay2r/sqlforge-3b/gguf/sqlforge-3b-Q4_K_M.gguf",
+                    help="fine-tuned GGUF as hf://owner/repo/file (default: SQLForge-3B Q4_K_M)")
     ap.add_argument("--sql-lora", default="", help="optional GGUF LoRA adapter (hf://repo/file)")
     ap.add_argument("--repo-url", default="", help="GitHub URL shown in the app header")
     ap.add_argument("--private", action="store_true")

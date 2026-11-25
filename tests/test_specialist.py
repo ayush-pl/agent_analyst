@@ -92,3 +92,38 @@ def test_summary_falls_back_on_invented_numbers_or_placeholders():
         llm = FineTunedSQLAnalystLLM(FakeSQL([]), ChattyGeneral(bad))
         out = asyncio.run(llm.summarize("Revenue by region?", "", COLS, ROWS, None, False))
         assert "826,396.65" in out and out != bad and llm.summary_fallbacks == 1
+
+
+def test_sqlforge_preset_matches_training_format():
+    class SQLForge(FakeSQL):
+        name = "sqlforge-3b-Q4_K_M"
+
+    llm = FineTunedSQLAnalystLLM(SQLForge([]), FakeGeneral())
+    assert llm.prompt_format == "sqlforge" and llm.system.startswith("You are an expert SQLite engineer.")
+    p = llm.sql_prompt("Orders by region?", "-- note: region is a column of customers\n-- note: revenue = x\n" + SCHEMA,
+                       [{"sql": "SELECT region FROM orders", "error": "no such column: region"}])
+    assert p.startswith("### Database schema\nCREATE TABLE customers")
+    assert "-- sample rows (customer_id | region):\n-- 1 | Europe" in p
+    hint = p.split("### Hint\n")[1].split("### SQL")[0]
+    assert hint.startswith("region is a column of customers") and "revenue = x" not in hint
+    assert "no such column: region" in hint and "Failed query" in hint
+    assert p.endswith("### SQL\n") and "-- note:" not in p and "dialect" not in p
+
+
+def test_closest_columns():
+    from analyst.llm import closest_columns
+    tables = {"customers": ["customer_id", "region"], "products": ["category", "unit_price"]}
+    assert closest_columns("customer_region", tables) == ["customers.region"]
+    assert closest_columns("UnitPrice", tables) == ["products.unit_price"]
+    assert closest_columns("zzz", tables) == []
+
+
+def test_hints_only_include_notes_the_question_mentions():
+    from analyst.specialist import relevant_evidence
+    notes = ("revenue refers to SUM(x) over completed orders.\nregion and segment are columns of customers.\n"
+             "Date columns (sale_date) are ISO text.\nOriginal headers: 'Store' is store; 'Qty' is qty.")
+    ev = relevant_evidence("How many customers are in each region?", notes)
+    assert "revenue" not in ev and "region and segment" in ev and "ISO" not in ev and "'Store'" not in ev
+    ev = relevant_evidence("What is monthly revenue?", notes)
+    assert "SUM(x)" in ev and "ISO text" in ev
+    assert "100.0 * part" in relevant_evidence("What is the return rate?", notes)

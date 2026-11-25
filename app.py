@@ -315,8 +315,13 @@ def build_ui():
     import gradio as gr
 
     sql_model = os.environ.get("ANALYST_SQL_MODEL", "")
-    model_line = (f"SQL model: `{Path(sql_model).name}`" if sql_model
-                  else "SQL model: Qwen2.5-Coder-3B (set `ANALYST_SQL_MODEL` for the fine-tuned weights)")
+    if "sqlforge" in sql_model.lower():
+        model_line = ("SQL model: [SQLForge-3B](https://huggingface.co/ay2r/sqlforge-3b) "
+                      "(Qwen2.5-Coder-3B fine-tuned with QLoRA on Spider + BIRD, 4-bit)")
+    elif sql_model:
+        model_line = f"SQL model: `{Path(sql_model).name}`"
+    else:
+        model_line = "SQL model: Qwen2.5-Coder-3B (set `ANALYST_SQL_MODEL` for the fine-tuned weights)"
     with gr.Blocks(title="AI Data Analyst") as ui:
         gr.Markdown(
             "# AI Data Analyst\n"

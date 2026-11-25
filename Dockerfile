@@ -19,7 +19,7 @@ ENV HOME=/home/user HF_HOME=/home/user/.cache/huggingface PYTHONUNBUFFERED=1 \
     ANALYST_LLM=specialist GRADIO_ANALYTICS_ENABLED=False
 
 # Set these as Space variables (they are passed as build args) or with --build-arg.
-ARG ANALYST_SQL_MODEL=""
+ARG ANALYST_SQL_MODEL="hf://ay2r/sqlforge-3b/gguf/sqlforge-3b-Q4_K_M.gguf"
 ARG ANALYST_SQL_LORA=""
 ARG ANALYST_REPO_URL=""
 ENV ANALYST_SQL_MODEL=${ANALYST_SQL_MODEL} ANALYST_SQL_LORA=${ANALYST_SQL_LORA} ANALYST_REPO_URL=${ANALYST_REPO_URL}
