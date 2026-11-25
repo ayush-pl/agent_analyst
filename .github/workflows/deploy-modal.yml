@@ -1,0 +1,37 @@
+# Deploys the live web app to Modal. Runs only when started by hand:
+# GitHub -> Actions -> "Deploy live app to Modal" -> Run workflow.
+# Needs two repository secrets (Settings -> Secrets and variables -> Actions):
+#   MODAL_TOKEN_ID, MODAL_TOKEN_SECRET   (from modal.com -> Settings -> API Tokens)
+name: Deploy live app to Modal
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Modal
+        run: pip install "modal==1.6.4"
+      - name: Check the secrets are set
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::error::Add MODAL_TOKEN_ID and MODAL_TOKEN_SECRET under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+      - name: Deploy
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: python -m modal deploy deploy/modal_app.py

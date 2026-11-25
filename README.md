@@ -214,6 +214,11 @@ ANALYST_LLM=mock python app.py     # UI only, no model
    modal deploy deploy/modal_app.py       # prints https://<you>--ai-data-analyst-web.modal.run
    ```
 
+   Or without installing anything: add `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` as GitHub
+   repository secrets and run the **Deploy live app to Modal** workflow from the Actions tab
+   (`.github/workflows/deploy-modal.yml`, manual trigger only). On Windows, if `modal.exe` is
+   blocked, use `python -m modal ...`.
+
 Hugging Face Gradio/Docker Spaces can also run the live app (`--sdk gradio` / `--sdk docker`),
 but on the cpu-basic tier they need a PRO subscription.
 
